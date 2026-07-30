@@ -173,13 +173,17 @@ public class FileScannerCli {
             System.out.println(DIVIDER);
             System.out.println("  DIRECTORY TREE (4 levels, 8 children per level)");
             System.out.println(DIVIDER);
-            boolean useBold = true;
+            var open = new boolean[16];
             for (var e : entries) {
-                String indent = "  ".repeat(e.depth());
-                String marker = e.depth() == 0 ? "" : (useBold ? "▶ " : "  ");
-                System.out.printf("  %10s  %s%s%s%n",
-                        formatSize(e.size()), indent, marker, e.name());
-                useBold = e.depth() == 0;
+                var prefix = new StringBuilder();
+                for (int d = 1; d <= e.depth(); d++) {
+                    prefix.append(d == e.depth()
+                            ? (e.last() ? "└── " : "├── ")
+                            : (open[d] ? "│   " : "    "));
+                }
+                open[e.depth()] = !e.last();
+                System.out.printf("  %10s  %s%s%n",
+                        formatSize(e.size()), prefix, e.name());
             }
         }
     }

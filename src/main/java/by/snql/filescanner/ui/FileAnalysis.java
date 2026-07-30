@@ -203,27 +203,25 @@ public final class FileAnalysis {
         public long getFileSize() { return fileSize; }
     }
 
-    public record DirEntry(int depth, String name, long size, String path) {}
+    public record DirEntry(int depth, String name, long size, String path, boolean last) {}
 
     public static List<DirEntry> directoryTree(FileNode root, int maxDepth, int maxChildren) {
         var result = new ArrayList<DirEntry>();
-        collectDirs(root, 0, maxDepth, maxChildren, result);
+        collectDirs(root, 0, maxDepth, maxChildren, result, true);
         return result;
     }
 
     private static void collectDirs(FileNode node, int depth, int maxDepth, int maxChildren,
-                                     List<DirEntry> result) {
+                                     List<DirEntry> result, boolean last) {
         if (!node.isDirectory()) return;
-        result.add(new DirEntry(depth, node.getName(), node.getSize(), node.getPath().toString()));
+        result.add(new DirEntry(depth, node.getName(), node.getSize(), node.getPath().toString(), last));
 
         if (depth >= maxDepth) return;
         var sorted = new ArrayList<>(node.getChildren());
         sorted.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
-        int count = 0;
-        for (var child : sorted) {
-            if (!child.isDirectory()) continue;
-            if (count++ >= maxChildren) break;
-            collectDirs(child, depth + 1, maxDepth, maxChildren, result);
+        var dirs = sorted.stream().filter(FileNode::isDirectory).limit(maxChildren).toList();
+        for (int i = 0; i < dirs.size(); i++) {
+            collectDirs(dirs.get(i), depth + 1, maxDepth, maxChildren, result, i == dirs.size() - 1);
         }
     }
 }

@@ -113,8 +113,8 @@ public class PdfReport {
         drawText(s, "Largest " + files.size() + " Files", MARGIN, y);
         y -= HEADER_HEIGHT + 4;
 
-        float colSize = MARGIN + 28;
-        float colPath = MARGIN + 105;
+        float colSize = MARGIN + 20;
+        float colPath = MARGIN + 90;
         s.setFont(bold, 9);
         drawText(s, "#", MARGIN, y);
         drawText(s, "Size", colSize, y);
@@ -128,7 +128,7 @@ public class PdfReport {
         for (var f : files) {
             if (y < MARGIN + ROW_HEIGHT) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); s.setFont(mono, 8); }
             drawText(s, padLeft(String.valueOf(i++), 2), MARGIN, y);
-            drawText(s, padLeft(formatSize(f.getSize()), 10), colSize, y);
+            drawText(s, padLeft(formatSize(f.getSize()), 8), colSize, y);
             float pathW = page.getMediaBox().getWidth() - colPath - MARGIN;
             drawText(s, fit(f.getPath().toString(), pathW, mono, 8), colPath, y);
             y -= ROW_HEIGHT;
@@ -156,27 +156,31 @@ public class PdfReport {
 
         s.setFont(bold, 9);
         drawText(s, "Size", MARGIN + 100, y);
-        drawText(s, "Directory", MARGIN + 200, y);
+        drawText(s, "Directory", MARGIN + 185, y);
         y -= HEADER_HEIGHT;
         drawLine(s, MARGIN, y, page.getMediaBox().getWidth() - MARGIN, y);
         y -= 3;
 
-        boolean useBold = true;
+        float nameX = MARGIN + 185;
+        float nameW = page.getMediaBox().getWidth() - nameX - MARGIN;
+        var open = new boolean[16];
+
         for (var e : entries) {
-            if (y < MARGIN + ROW_HEIGHT) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); }
+            if (y < MARGIN + ROW_HEIGHT) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); nameW = page.getMediaBox().getWidth() - nameX - MARGIN; }
 
-            String indent = "  ".repeat(e.depth());
-            String marker = e.depth() == 0 ? "" : (useBold ? "▶ " : "  ");
-            s.setFont(useBold ? bold : font, useBold ? 9 : 8);
+            var prefix = new StringBuilder();
+            for (int d = 1; d <= e.depth(); d++) {
+                prefix.append(d == e.depth()
+                        ? (e.last() ? "└── " : "├── ")
+                        : (open[d] ? "│   " : "    "));
+            }
+            open[e.depth()] = !e.last();
 
-            float nameX = MARGIN + 200;
-            float nameW = page.getMediaBox().getWidth() - nameX - MARGIN;
+            s.setFont(e.depth() == 0 ? bold : font, e.depth() == 0 ? 10 : 8);
             drawText(s, padLeft(formatSize(e.size()), 10), MARGIN + 100, y);
-            drawText(s, fit(indent + marker + e.name(), nameW,
-                    useBold ? bold : font, useBold ? 9 : 8), nameX, y);
+            drawText(s, fit(prefix + e.name(), nameW,
+                    e.depth() == 0 ? bold : font, e.depth() == 0 ? 10 : 8), nameX, y);
             y -= ROW_HEIGHT;
-
-            useBold = e.depth() == 0;
         }
         s.close();
     }

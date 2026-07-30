@@ -1,0 +1,216 @@
+package by.snql.filescanner.ui;
+
+import by.snql.filescanner.model.FileNode;
+
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.util.*;
+import java.util.stream.Collectors;
+
+public final class FileAnalysis {
+
+    private static final Set<String> EXCLUDE_PATTERNS = Set.of(
+            ".git/", "node_modules/", "target/", "__pycache__/", ".next/",
+            "build/", "dist/", "vendor/", ".venv/", "venv/", ".gradle/"
+    );
+
+    private static final long MIN_WASTE_THRESHOLD = 1024;
+    private static final int MAX_GROUPS = 50;
+    private static final int MAX_FILES_PER_GROUP = 3;
+
+    private FileAnalysis() {}
+
+    public static List<FileNode> flattenFiles(FileNode root) {
+        var result = new ArrayList<FileNode>();
+        collectFiles(root, result);
+        return result;
+    }
+
+    private static void collectFiles(FileNode node, List<FileNode> result) {
+        if (!node.isDirectory()) {
+            result.add(node);
+        }
+        for (var child : node.getChildren()) {
+            collectFiles(child, result);
+        }
+    }
+
+    public static List<FileNode> largestFiles(FileNode root, int limit) {
+        return flattenFiles(root).stream()
+                .sorted(Comparator.comparingLong(FileNode::getSize).reversed())
+                .limit(limit)
+                .collect(Collectors.toList());
+    }
+
+    public static Map<String, FileTypeStat> fileTypeBreakdown(FileNode root) {
+        var map = new TreeMap<String, FileTypeStat>();
+        for (var file : flattenFiles(root)) {
+            String ext = extension(file.getName());
+            var stat = map.computeIfAbsent(ext, FileTypeStat::new);
+            stat.count++;
+            stat.totalSize += file.getSize();
+        }
+        return map;
+    }
+
+    public static List<DuplicateGroup> findDuplicates(FileNode root) {
+        var bySize = new HashMap<Long, List<FileNode>>();
+        for (var file : flattenFiles(root)) {
+            if (file.getSize() == 0) continue;
+            if (isExcluded(file.getPath().toString())) continue;
+            bySize.computeIfAbsent(file.getSize(), k -> new ArrayList<>()).add(file);
+        }
+
+        var result = new ArrayList<DuplicateGroup>();
+        boolean useHash = Settings.get().duplicateSHA256;
+
+        for (var entry : bySize.entrySet()) {
+            var group = entry.getValue();
+            if (group.size() < 2) continue;
+
+            var byHash = new HashMap<String, List<FileNode>>();
+            for (var file : group) {
+                String hash = useHash ? hashFile(file) : quickHash(file);
+                byHash.computeIfAbsent(hash, k -> new ArrayList<>()).add(file);
+            }
+            for (var sub : byHash.values()) {
+                if (sub.size() >= 2) {
+                    result.add(new DuplicateGroup(sub));
+                }
+            }
+        }
+
+        result.removeIf(g -> g.wastedSize() < MIN_WASTE_THRESHOLD);
+        result.sort((a, b) -> Long.compare(b.wastedSize(), a.wastedSize()));
+        if (result.size() > MAX_GROUPS) {
+            result = new ArrayList<>(result.subList(0, MAX_GROUPS));
+        }
+        return result;
+    }
+
+    private static String quickHash(FileNode file) {
+        try (var in = Files.newInputStream(file.getPath())) {
+            var digest = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[8192];
+            int read = in.read(buf);
+            if (read > 0) digest.update(buf, 0, read);
+            return bytesToHex(digest.digest()) + ":" + file.getSize();
+        } catch (Exception e) {
+            return file.getPath().toString();
+        }
+    }
+
+    public static String commonPathPrefix(List<FileNode> files) {
+        if (files.isEmpty()) return "";
+        var paths = files.stream().map(f -> f.getPath().toString()).toList();
+        String first = paths.get(0);
+        int len = first.length();
+        for (int i = 1; i < paths.size(); i++) {
+            String s = paths.get(i);
+            int j = 0;
+            while (j < len && j < s.length() && first.charAt(j) == s.charAt(j)) j++;
+            len = j;
+        }
+        int lastSlash = first.lastIndexOf('/', len);
+        return lastSlash > 0 ? first.substring(0, lastSlash + 1) : first.substring(0, len);
+    }
+
+    private static boolean isExcluded(String path) {
+        for (var pattern : EXCLUDE_PATTERNS) {
+            if (path.contains(pattern)) return true;
+        }
+        return false;
+    }
+
+    public static List<FileNode> oldFiles(FileNode root, long olderThanMillis) {
+        long cutoff = System.currentTimeMillis() - olderThanMillis;
+        return flattenFiles(root).stream()
+                .filter(f -> lastModified(f) > 0 && lastModified(f) < cutoff)
+                .sorted(Comparator.comparingLong(FileAnalysis::lastModified))
+                .collect(Collectors.toList());
+    }
+
+    public static List<FileNode> findEmptyDirs(FileNode root) {
+        var result = new ArrayList<FileNode>();
+        collectEmptyDirs(root, result);
+        return result;
+    }
+
+    private static void collectEmptyDirs(FileNode node, List<FileNode> result) {
+        if (node.isDirectory() && node.getChildren().isEmpty()) {
+            result.add(node);
+        }
+        for (var child : node.getChildren()) {
+            collectEmptyDirs(child, result);
+        }
+    }
+
+    public static long totalDuplicateWaste(List<DuplicateGroup> groups) {
+        return groups.stream().mapToLong(g -> g.wastedSize()).sum();
+    }
+
+    private static String extension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "(no extension)";
+    }
+
+    private static String hashFile(FileNode file) {
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            try (var in = new DigestInputStream(Files.newInputStream(file.getPath()), digest)) {
+                byte[] buf = new byte[8192];
+                while (in.read(buf) != -1) {}
+            }
+            return bytesToHex(digest.digest());
+        } catch (Exception e) {
+            return file.getPath().toString();
+        }
+    }
+
+    private static long lastModified(FileNode file) {
+        try {
+            return Files.readAttributes(file.getPath(), BasicFileAttributes.class).lastModifiedTime().toMillis();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        var sb = new StringBuilder();
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    public static class FileTypeStat {
+        public final String extension;
+        public int count;
+        public long totalSize;
+
+        FileTypeStat(String extension) {
+            this.extension = extension;
+        }
+
+        public long getTotalSize() { return totalSize; }
+        public int getCount() { return count; }
+        public String getExtension() { return extension; }
+    }
+
+    public static class DuplicateGroup {
+        public final List<FileNode> files;
+        public final long fileSize;
+
+        DuplicateGroup(List<FileNode> files) {
+            this.files = files;
+            this.fileSize = files.get(0).getSize();
+        }
+
+        public long wastedSize() {
+            return fileSize * (files.size() - 1);
+        }
+
+        public List<FileNode> getFiles() { return files; }
+        public long getFileSize() { return fileSize; }
+    }
+}

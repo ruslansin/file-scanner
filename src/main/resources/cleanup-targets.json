@@ -1,0 +1,87 @@
+{
+  "windows": [
+    { "name": "Windows Update Cache",      "path": "%WINDIR%\\SoftwareDistribution\\Download", "description": "Cached Windows Update files" },
+    { "name": "System Temp",                "path": "%WINDIR%\\Temp",                            "description": "Temporary system files" },
+    { "name": "User Temp",                  "path": "%TEMP%",                                    "description": "User temporary files" },
+    { "name": "Prefetch",                   "path": "%WINDIR%\\Prefetch",                        "description": "Application startup cache" },
+    { "name": "Installer Cache",            "path": "%WINDIR%\\Installer",                       "description": "MSI/installer orphans" },
+    { "name": "Delivery Optimization",      "path": "%WINDIR%\\DeliveryOptimization",            "description": "P2P update sharing cache" },
+    { "name": "CBS Logs",                   "path": "%WINDIR%\\Logs\\CBS",                       "description": "Component servicing logs" },
+    { "name": "Thumbnail Cache",            "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db", "description": "Thumbnail cache files", "filesOnly": true },
+    { "name": "IE/Edge Cache",              "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",    "description": "Internet Explorer / Edge cache" },
+    { "name": "Recycle Bin (C:)",           "path": "C:\\$Recycle.Bin",                          "description": "Deleted files on C:" },
+    { "name": "Recycle Bin (D:)",           "path": "D:\\$Recycle.Bin",                          "description": "Deleted files on D:" }
+  ],
+
+  "linux": [
+    { "name": "Systemd Journal",            "path": "/var/log/journal",                          "description": "Systemd journal logs" },
+    { "name": "APT Cache",                  "path": "/var/cache/apt/archives",                   "description": "Downloaded APT packages" },
+    { "name": "Snap Cache",                 "path": "/var/lib/snapd/cache",                      "description": "Snap package cache" },
+    { "name": "Old /tmp files",             "path": "/tmp",                                      "description": "Temporary files", "daysOld": 1 },
+    { "name": "Trash",                      "path": "$HOME/.local/share/Trash",                  "description": "User trash" },
+    { "name": "User Cache",                 "path": "$XDG_CACHE_HOME",                           "description": "XDG cache directory" },
+    { "name": "Journal Logs",               "path": "/var/log",                                  "description": "System log files", "extension": ".log" }
+  ],
+
+  "macos": [
+    { "name": "User Caches",                "path": "$HOME/Library/Caches",                      "description": "Application caches" },
+    { "name": "User Logs",                  "path": "$HOME/Library/Logs",                        "description": "Application logs" },
+    { "name": "System Caches",              "path": "/Library/Caches",                           "description": "System caches" },
+    { "name": "System Logs",                "path": "/Library/Logs",                             "description": "System logs" },
+    { "name": "Trash",                      "path": "$HOME/.Trash",                              "description": "User trash" },
+    { "name": "VS Code Cache",              "path": "$HOME/Library/Application Support/Code/Cache", "description": "VS Code cache" },
+    { "name": "Xcode DerivedData",          "path": "$HOME/Library/Developer/Xcode/DerivedData", "description": "Xcode build artifacts" }
+  ],
+
+  "developer": [
+    { "name": "Maven Repository",           "path": "$HOME/.m2/repository",                      "description": "Local Maven artifacts" },
+    { "name": "Gradle Caches",              "path": "$HOME/.gradle/caches",                      "description": "Gradle build cache" },
+    { "name": "npm Cache",                  "path": "$HOME/.npm/_cacache",                       "description": "npm package cache" },
+    { "name": "pip Cache (linux/mac)",      "path": "$HOME/.cache/pip",   "winPath": "%LOCALAPPDATA%\\pip\\cache",    "description": "pip package cache" },
+    { "name": "Cargo Registry",             "path": "$HOME/.cargo/registry/cache",               "description": "Rust crate cache" },
+    { "name": "Go Module Cache",            "path": "$HOME/go/pkg/mod",                          "description": "Go module cache" },
+    { "name": "NuGet Packages",             "path": "$HOME/.nuget/packages",                     "description": "NuGet package cache" },
+    { "name": "Yarn Cache",                 "path": "$HOME/.yarn/cache",     "winPath": "%LOCALAPPDATA%\\Yarn\\cache", "description": "Yarn package cache" },
+    { "name": "Composer Cache",             "path": "$HOME/.composer/cache",                     "description": "PHP Composer cache" },
+    { "name": "RubyGems Cache",             "path": "$HOME/.gem/cache",                          "description": "Ruby gem cache" },
+    { "name": "Docker BuildKit",            "path": "$HOME/.docker/buildkit",                    "description": "Docker BuildKit cache" },
+    { "name": "Docker Cleanup",             "path": "$HOME/.docker",                            "description": "Remove unused Docker data",                        "customCommand": "docker system prune -a -f --volumes 2>/dev/null || echo 'docker not running'" },
+    { "name": "Docker Images (native)",     "linuxPath": "/var/lib/docker/overlay2",                "description": "Docker image layers — run: docker system prune -a" },
+    { "name": "Docker Volumes (native)",    "linuxPath": "/var/lib/docker/volumes",                 "description": "Docker named volumes — run: docker volume prune" },
+    { "name": "Docker Temp (native)",       "linuxPath": "/var/lib/docker/tmp",                     "description": "Docker temporary files" },
+    { "name": "Docker Images (rootless)",   "linuxPath": "$HOME/.local/share/docker/overlay2",      "description": "Docker rootless image layers" },
+    { "name": "Docker Volumes (rootless)",  "linuxPath": "$HOME/.local/share/docker/volumes",       "description": "Docker rootless volumes" },
+    { "name": "Docker Desktop WSL disk",    "winPath": "%LOCALAPPDATA%\\Docker\\wsl",                "description": "Docker Desktop WSL2 virtual disk" },
+    { "name": "Docker Desktop config",      "winPath": "%APPDATA%\\Docker",                          "description": "Docker Desktop config and metadata" },
+    { "name": "Docker Desktop VM disk",     "macPath": "$HOME/Library/Containers/com.docker.docker/Data", "description": "Docker Desktop VM data" },
+    { "name": "Conda Packages",             "path": "$HOME/miniconda3/pkgs",                     "description": "Miniconda package cache" },
+    { "name": "Anaconda Packages",          "path": "$HOME/anaconda3/pkgs",                      "description": "Anaconda package cache" },
+    { "name": "Homebrew Cache (macOS)",     "path": "$HOME/Library/Caches/Homebrew",             "description": "Homebrew formula cache" },
+    { "name": "Android SDK Cache",          "path": "$HOME/.android/cache",                      "description": "Android SDK cache" }
+  ],
+
+  "buildArtifacts": [
+    { "name": "node_modules" },
+    { "name": "target" },
+    { "name": "build" },
+    { "name": ".gradle" },
+    { "name": "__pycache__" },
+    { "name": "dist" },
+    { "name": ".next" },
+    { "name": "vendor" },
+    { "name": ".venv" },
+    { "name": "venv" },
+    { "name": ".nuxt" },
+    { "name": ".output" },
+    { "name": "bin" },
+    { "name": "obj" },
+    { "name": ".pytest_cache" }
+  ],
+
+  "scanRoots": [
+    "$HOME/dev",
+    "$HOME/projects",
+    "$HOME/git",
+    "$HOME/IdeaProjects"
+  ]
+}

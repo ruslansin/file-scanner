@@ -103,9 +103,8 @@ public class TreemapChart extends StackPane {
     }
 
     private Color colorFor(FileNode node, int depth) {
-        if (node.isLeaf()) {
-            int hash = node.getName().hashCode();
-            return PALETTE[Math.abs(hash) % PALETTE.length].deriveColor(1, 1, 0.7 + depth * 0.05, 1);
+        if (node.isLeaf() || !node.isDirectory()) {
+            return FileTypeCategory.forFile(node.getName()).color().deriveColor(1, 1, 0.7 + depth * 0.05, 1);
         }
         double b = 0.5 + depth * 0.08;
         return Color.rgb((int)(52 * b), (int)(73 * b), (int)(94 * b));

@@ -11,6 +11,9 @@ public class FileNode implements Comparable<FileNode> {
     private final boolean directory;
     private long size;
     private final List<FileNode> children;
+    private boolean buildArtifact;
+    private boolean symlink;
+    private boolean hardlinkReference;
 
     public FileNode(Path path, String name, boolean directory, long size) {
         this.path = path;
@@ -32,6 +35,15 @@ public class FileNode implements Comparable<FileNode> {
     public void setSize(long size) { this.size = size; }
     public List<FileNode> getChildren() { return children; }
     public boolean isLeaf() { return children.isEmpty(); }
+
+    public boolean isBuildArtifact() { return buildArtifact; }
+    public void setBuildArtifact(boolean b) { this.buildArtifact = b; }
+
+    public boolean isSymlink() { return symlink; }
+    public void setSymlink(boolean s) { this.symlink = s; }
+
+    public boolean isHardlinkReference() { return hardlinkReference; }
+    public void setHardlinkReference(boolean h) { this.hardlinkReference = h; }
 
     public void sortChildren() {
         children.sort(FileNode::compareTo);

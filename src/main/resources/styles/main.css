@@ -1,0 +1,44 @@
+.root {
+    -fx-font-family: "SansSerif";
+    -fx-font-size: 13px;
+}
+
+.tree-view {
+    -fx-background-color: #fafafa;
+}
+
+.tree-cell {
+    -fx-padding: 2px 4px;
+}
+
+.button {
+    -fx-background-color: #3498db;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-padding: 8px 16px;
+    -fx-background-radius: 4px;
+    -fx-cursor: hand;
+}
+
+.button:hover {
+    -fx-background-color: #2980b9;
+}
+
+.button:disabled {
+    -fx-background-color: #bdc3c7;
+    -fx-opacity: 0.8;
+}
+
+.progress-bar {
+    -fx-accent: #2ecc71;
+}
+
+.progress-bar .track {
+    -fx-background-color: #ecf0f1;
+    -fx-background-radius: 4px;
+}
+
+.split-pane-divider {
+    -fx-background-color: #bdc3c7;
+    -fx-padding: 0 2px;
+}

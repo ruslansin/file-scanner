@@ -178,8 +178,8 @@ public class FileScannerCli {
                 var prefix = new StringBuilder();
                 for (int d = 1; d <= e.depth(); d++) {
                     prefix.append(d == e.depth()
-                            ? (e.last() ? "└── " : "├── ")
-                            : (open[d] ? "│   " : "    "));
+                            ? (e.last() ? "`-- " : "+-- ")
+                            : (open[d] ? "|   " : "    "));
                 }
                 open[e.depth()] = !e.last();
                 System.out.printf("  %10s  %s%s%n",

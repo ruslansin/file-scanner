@@ -171,8 +171,8 @@ public class PdfReport {
             var prefix = new StringBuilder();
             for (int d = 1; d <= e.depth(); d++) {
                 prefix.append(d == e.depth()
-                        ? (e.last() ? "└── " : "├── ")
-                        : (open[d] ? "│   " : "    "));
+                        ? (e.last() ? "`-- " : "+-- ")
+                        : (open[d] ? "|   " : "    "));
             }
             open[e.depth()] = !e.last();
 

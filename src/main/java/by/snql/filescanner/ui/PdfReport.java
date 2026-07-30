@@ -129,9 +129,8 @@ public class PdfReport {
             if (y < MARGIN + ROW_HEIGHT) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); s.setFont(mono, 8); }
             drawText(s, padLeft(String.valueOf(i++), 2), MARGIN, y);
             drawText(s, padLeft(formatSize(f.getSize()), 10), colSize, y);
-            String path = f.getPath().toString();
-            if (path.length() > 100) path = "…" + path.substring(path.length() - 99);
-            drawText(s, path, colPath, y);
+            float pathW = page.getMediaBox().getWidth() - colPath - MARGIN;
+            drawText(s, fit(f.getPath().toString(), pathW, mono, 8), colPath, y);
             y -= ROW_HEIGHT;
         }
         s.close();
@@ -170,8 +169,11 @@ public class PdfReport {
             String marker = e.depth() == 0 ? "" : (useBold ? "▶ " : "  ");
             s.setFont(useBold ? bold : font, useBold ? 9 : 8);
 
+            float nameX = MARGIN + 200;
+            float nameW = page.getMediaBox().getWidth() - nameX - MARGIN;
             drawText(s, padLeft(formatSize(e.size()), 10), MARGIN + 100, y);
-            drawText(s, indent + marker + e.name(), MARGIN + 200, y);
+            drawText(s, fit(indent + marker + e.name(), nameW,
+                    useBold ? bold : font, useBold ? 9 : 8), nameX, y);
             y -= ROW_HEIGHT;
 
             useBold = e.depth() == 0;
@@ -233,10 +235,12 @@ public class PdfReport {
                 y -= 12;
             }
             s.setFont(mono, 7);
+            float dx = MARGIN + 8;
+            float dw = page.getMediaBox().getWidth() - dx - MARGIN;
             int shown = 0;
             for (var f : g.files) {
                 if (shown++ >= 3) break;
-                drawText(s, "  " + f.getPath().toString(), MARGIN + 8, y);
+                drawText(s, "  " + fit(f.getPath().toString(), dw, mono, 7), dx, y);
                 y -= 11;
             }
             if (g.files.size() > 3) {
@@ -261,9 +265,11 @@ public class PdfReport {
         y -= HEADER_HEIGHT + 4;
 
         s.setFont(mono, 8);
+        float dx = MARGIN + 5;
+        float dw = page.getMediaBox().getWidth() - dx - MARGIN;
         for (var d : dirs) {
             if (y < MARGIN) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); s.setFont(mono, 8); }
-            drawText(s, d.getPath().toString(), MARGIN + 5, y);
+            drawText(s, fit(d.getPath().toString(), dw, mono, 8), dx, y);
             y -= 12;
         }
         s.close();
@@ -405,5 +411,18 @@ public class PdfReport {
             sb.append(c < 128 ? c : (c < 256 ? c : '?'));
         }
         return sb.toString();
+    }
+
+    private static String fit(String text, float maxWidth, PDType1Font font, float fontSize)
+            throws IOException {
+        if (text.isEmpty()) return text;
+        float tw = font.getStringWidth(asciiSafe(text)) / 1000f * fontSize;
+        if (tw <= maxWidth) return text;
+        for (int i = text.length() - 1; i > 3; i--) {
+            String cut = "…" + text.substring(text.length() - i);
+            float cw = font.getStringWidth(cut) / 1000f * fontSize;
+            if (cw <= maxWidth) return cut;
+        }
+        return "…";
     }
 }

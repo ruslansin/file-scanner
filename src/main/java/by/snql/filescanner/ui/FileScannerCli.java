@@ -65,7 +65,7 @@ public class FileScannerCli {
         }
 
         if (!largest && !duplicates && !types && !empty && !compress && !groups) {
-            largest = types = true;
+            largest = true;
         }
 
         var scanner = new FileScanner();
@@ -105,7 +105,7 @@ public class FileScannerCli {
             result.put("symlink_count", linkCount);
 
             if (largest) outputLargest(node, limit, json, result);
-            if (types) outputTypes(node, json, result);
+            outputTree(node, json, result);
             if (duplicates) outputDuplicates(node, json, result);
             if (empty) outputEmpty(node, json, result);
             if (compress) outputCompress(node, json, result);
@@ -164,6 +164,24 @@ public class FileScannerCli {
         result.put("largest_files", files.stream()
                 .map(f -> Map.of("path", f.getPath().toString(), "size", f.getSize(), "size_human", formatSize(f.getSize())))
                 .collect(Collectors.toList()));
+    }
+
+    private static void outputTree(FileNode node, boolean json, Map<String, Object> result) {
+        var entries = FileAnalysis.directoryTree(node, 4, 8);
+        if (!json) {
+            System.out.println();
+            System.out.println(DIVIDER);
+            System.out.println("  DIRECTORY TREE (4 levels, 8 children per level)");
+            System.out.println(DIVIDER);
+            boolean useBold = true;
+            for (var e : entries) {
+                String indent = "  ".repeat(e.depth());
+                String marker = e.depth() == 0 ? "" : (useBold ? "▶ " : "  ");
+                System.out.printf("  %10s  %s%s%s%n",
+                        formatSize(e.size()), indent, marker, e.name());
+                useBold = e.depth() == 0;
+            }
+        }
     }
 
     private static void outputTypes(FileNode node, boolean json, Map<String, Object> result) {

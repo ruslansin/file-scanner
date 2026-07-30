@@ -202,4 +202,28 @@ public final class FileAnalysis {
         public List<FileNode> getFiles() { return files; }
         public long getFileSize() { return fileSize; }
     }
+
+    public record DirEntry(int depth, String name, long size, String path) {}
+
+    public static List<DirEntry> directoryTree(FileNode root, int maxDepth, int maxChildren) {
+        var result = new ArrayList<DirEntry>();
+        collectDirs(root, 0, maxDepth, maxChildren, result);
+        return result;
+    }
+
+    private static void collectDirs(FileNode node, int depth, int maxDepth, int maxChildren,
+                                     List<DirEntry> result) {
+        if (!node.isDirectory()) return;
+        result.add(new DirEntry(depth, node.getName(), node.getSize(), node.getPath().toString()));
+
+        if (depth >= maxDepth) return;
+        var sorted = new ArrayList<>(node.getChildren());
+        sorted.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+        int count = 0;
+        for (var child : sorted) {
+            if (!child.isDirectory()) continue;
+            if (count++ >= maxChildren) break;
+            collectDirs(child, depth + 1, maxDepth, maxChildren, result);
+        }
+    }
 }

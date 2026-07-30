@@ -8,15 +8,12 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 
-import java.awt.Color;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 
 public class PdfReport {
@@ -27,13 +24,6 @@ public class PdfReport {
     private static final float MARGIN = 50;
     private static final float ROW_HEIGHT = 14;
     private static final float HEADER_HEIGHT = 20;
-
-    private static final Color[] PIE_COLORS = {
-            new Color(0x34, 0x98, 0xDB), new Color(0x2E, 0xCC, 0x71),
-            new Color(0xE7, 0x4C, 0x3C), new Color(0x9B, 0x59, 0xB6),
-            new Color(0xF3, 0x9C, 0x12), new Color(0x1A, 0xBC, 0x9C),
-            new Color(0xE6, 0x7E, 0x22), new Color(0x95, 0xA5, 0xA6)
-    };
 
     public static void generate(FileNode root, Path outputFile, int largestLimit) throws IOException {
         try (var doc = new PDDocument()) {
@@ -46,7 +36,7 @@ public class PdfReport {
 
             addTitlePage(doc, font, boldFont, root, allFiles.size(), dirCount);
             addLargestFiles(doc, font, boldFont, monoFont, root, largestLimit);
-            addFileTypes(doc, font, boldFont, monoFont, root);
+            addDirectoryTree(doc, font, boldFont, monoFont, root);
             addDuplicatesSection(doc, font, boldFont, monoFont, root);
 
             var emptyDirs = FileAnalysis.findEmptyDirs(root);
@@ -100,7 +90,7 @@ public class PdfReport {
         drawText(s, "Contents", MARGIN, y);
         y -= 22;
         s.setFont(font, 11);
-        for (var line : List.of("1. Largest Files", "2. File Types", "3. Duplicates",
+        for (var line : List.of("1. Largest Files", "2. Directory Tree", "3. Duplicates",
                 "4. Empty Directories", "5. Compression Estimate")) {
             drawText(s, "    " + line, MARGIN, y);
             y -= ROW_HEIGHT;
@@ -147,121 +137,46 @@ public class PdfReport {
         s.close();
     }
 
-    // ── File Types (table + pie chart) ──
+    // ── Directory Tree ──
 
-    private static void addFileTypes(PDDocument doc, PDType1Font font, PDType1Font bold,
-                                      PDType1Font mono, FileNode root) throws IOException {
-        var map = FileAnalysis.fileTypeBreakdown(root);
-        var sorted = map.values().stream()
-                .sorted(Comparator.comparingLong(FileAnalysis.FileTypeStat::getTotalSize).reversed())
-                .toList();
-        if (sorted.isEmpty()) return;
+    private static void addDirectoryTree(PDDocument doc, PDType1Font font, PDType1Font bold,
+                                          PDType1Font mono, FileNode root) throws IOException {
+        var entries = FileAnalysis.directoryTree(root, 4, 8);
+        if (entries.isEmpty()) return;
 
         var page = newPage(doc);
-        float w = page.getMediaBox().getWidth();
         float y = freshY(page);
         var s = new PDPageContentStream(doc, page);
 
         s.setFont(bold, 16);
-        drawText(s, "File Types", MARGIN, y);
-        y -= HEADER_HEIGHT + 4;
-
-        drawPieChart(s, sorted, w - MARGIN - 130, y - 120, 120);
-
-        float[] cols = {MARGIN, MARGIN + 100, MARGIN + 165, MARGIN + 250};
-        s.setFont(bold, 9);
-        drawText(s, "Extension", cols[0], y);
-        drawText(s, "Files", cols[1], y);
-        drawText(s, "Size", cols[2], y);
-        drawText(s, "Share", cols[3], y);
-        y -= HEADER_HEIGHT;
-        drawLine(s, MARGIN, y, w - MARGIN - 140, y);
-        y -= 2;
-
+        drawText(s, "Directory Tree", MARGIN, y);
+        y -= HEADER_HEIGHT + 2;
         s.setFont(font, 9);
-        long total = sorted.stream().mapToLong(FileAnalysis.FileTypeStat::getTotalSize).sum();
-        for (var st : sorted) {
-            if (y < MARGIN) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); s.setFont(font, 9); }
-            double pct = total > 0 ? (double) st.getTotalSize() / total * 100 : 0;
-            drawText(s, st.getExtension(), cols[0], y);
-            drawText(s, formatNum(st.getCount()), cols[1], y);
-            drawText(s, formatSize(st.getTotalSize()), cols[2], y);
-            drawText(s, String.format("%.1f%%", pct), cols[3], y);
+        drawText(s, "Depth: 4 levels, 8 children per level. Sorted by size.", MARGIN, y);
+        y -= HEADER_HEIGHT;
+
+        s.setFont(bold, 9);
+        drawText(s, "Size", MARGIN + 100, y);
+        drawText(s, "Directory", MARGIN + 200, y);
+        y -= HEADER_HEIGHT;
+        drawLine(s, MARGIN, y, page.getMediaBox().getWidth() - MARGIN, y);
+        y -= 3;
+
+        boolean useBold = true;
+        for (var e : entries) {
+            if (y < MARGIN + ROW_HEIGHT) { s.close(); page = newPage(doc); y = freshY(page); s = resumeStream(doc, page); }
+
+            String indent = "  ".repeat(e.depth());
+            String marker = e.depth() == 0 ? "" : (useBold ? "▶ " : "  ");
+            s.setFont(useBold ? bold : font, useBold ? 9 : 8);
+
+            drawText(s, padLeft(formatSize(e.size()), 10), MARGIN + 100, y);
+            drawText(s, indent + marker + e.name(), MARGIN + 200, y);
             y -= ROW_HEIGHT;
+
+            useBold = e.depth() == 0;
         }
         s.close();
-    }
-
-    private static void drawPieChart(PDPageContentStream s,
-                                      List<FileAnalysis.FileTypeStat> sorted,
-                                      float cx, float cy, float radius) throws IOException {
-        long total = sorted.stream().mapToLong(FileAnalysis.FileTypeStat::getTotalSize).sum();
-        if (total == 0) return;
-
-        int count = Math.min(sorted.size(), 7);
-        double angle = 90;
-        for (int i = 0; i < count; i++) {
-            double sweep = (double) sorted.get(i).getTotalSize() / total * 360;
-            if (sweep < 2) break;
-
-            Color color = PIE_COLORS[i % PIE_COLORS.length];
-            s.setNonStrokingColor(color.getRed() / 255f, color.getGreen() / 255f, color.getBlue() / 255f);
-            s.setStrokingColor(1, 1, 1);
-            s.setLineWidth(0.5f);
-            drawArc(s, cx, cy, radius, angle, sweep);
-            angle += sweep;
-        }
-        if (count < sorted.size()) {
-            double remaining = 360 - (angle - 90);
-            if (remaining > 2) {
-                s.setNonStrokingColor(0.58f, 0.65f, 0.65f);
-                drawArc(s, cx, cy, radius, angle, remaining);
-            }
-        }
-        s.setNonStrokingColor(1, 1, 1);
-        float holeR = radius * 0.4f;
-        float k = 0.5522847498f * holeR;
-        s.moveTo(cx + holeR, cy);
-        s.curveTo(cx + holeR, cy - k, cx + k, cy - holeR, cx, cy - holeR);
-        s.curveTo(cx - k, cy - holeR, cx - holeR, cy - k, cx - holeR, cy);
-        s.curveTo(cx - holeR, cy + k, cx - k, cy + holeR, cx, cy + holeR);
-        s.curveTo(cx + k, cy + holeR, cx + holeR, cy + k, cx + holeR, cy);
-        s.fill();
-
-        float legendX = cx + radius + 20;
-        float legendY = cy + radius - 15;
-        s.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 8);
-        for (int i = 0; i < count; i++) {
-            var st = sorted.get(i);
-            double pct = (double) st.getTotalSize() / total * 100;
-            if (pct < 1) break;
-            Color color = PIE_COLORS[i % PIE_COLORS.length];
-            s.setNonStrokingColor(color.getRed() / 255f, color.getGreen() / 255f, color.getBlue() / 255f);
-            s.addRect(legendX, legendY - 6, 10, 10);
-            s.fill();
-            s.setNonStrokingColor(0, 0, 0);
-            drawText(s, st.getExtension() + " " + String.format("%.1f%%", pct), legendX + 14, legendY);
-            legendY -= 16;
-        }
-    }
-
-    private static void drawArc(PDPageContentStream s, float cx, float cy, float r,
-                                 double startAngle, double sweep) throws IOException {
-        double startRad = Math.toRadians(startAngle);
-        double endRad = Math.toRadians(startAngle + sweep);
-        float x1 = (float)(cx + r * Math.cos(startRad));
-        float y1 = (float)(cy - r * Math.sin(startRad));
-        float xc = (float)(cx + r * 1.5 * Math.cos(Math.toRadians(startAngle + sweep / 2)));
-        float yc = (float)(cy - r * 1.5 * Math.sin(Math.toRadians(startAngle + sweep / 2)));
-        float x2 = (float)(cx + r * Math.cos(endRad));
-        float y2 = (float)(cy - r * Math.sin(endRad));
-
-        s.moveTo(cx, cy);
-        s.lineTo(x1, y1);
-        s.curveTo(xc, yc, xc, yc, x2, y2);
-        s.lineTo(cx, cy);
-        s.fill();
-        s.stroke();
     }
 
     // ── Duplicates ──

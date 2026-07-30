@@ -26,7 +26,6 @@ public class FileScannerCli {
         boolean json = false;
         boolean pdf = false;
         String pdfPath = null;
-        boolean sha256 = false;
         boolean largest = false;
         boolean duplicates = false;
         boolean types = false;
@@ -40,7 +39,6 @@ public class FileScannerCli {
                 case "--scan", "-s" -> dir = args[++i];
                 case "--json", "-j" -> json = true;
                 case "--pdf" -> { pdf = true; pdfPath = args[++i]; }
-                case "--sha256" -> sha256 = true;
                 case "--largest", "-l" -> largest = true;
                 case "--duplicates", "-d" -> duplicates = true;
                 case "--types", "-t" -> types = true;
@@ -68,10 +66,6 @@ public class FileScannerCli {
 
         if (!largest && !duplicates && !types && !empty && !compress && !groups) {
             largest = types = true;
-        }
-
-        if (sha256) {
-            Settings.get().duplicateSHA256 = true;
         }
 
         var scanner = new FileScanner();
@@ -198,6 +192,16 @@ public class FileScannerCli {
     }
 
     private static void outputDuplicates(FileNode node, boolean json, Map<String, Object> result) {
+        if (!Settings.get().duplicateSHA256) {
+            if (!json) {
+                System.out.println();
+                System.out.println(DIVIDER);
+                System.out.println("  DUPLICATES (disabled — enable SHA-256 in Settings)");
+                System.out.println(DIVIDER);
+            }
+            result.put("duplicates", List.of());
+            return;
+        }
         var groups = FileAnalysis.findDuplicates(node);
         if (!json) {
             System.out.println();

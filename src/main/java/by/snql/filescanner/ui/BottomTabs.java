@@ -165,22 +165,24 @@ public class BottomTabs {
 
     private void refreshDuplicates() {
         if (root == null) return;
-        var groups = FileAnalysis.findDuplicates(root);
         duplicatesBox.getChildren().clear();
 
-        if (groups.isEmpty()) {
-            duplicatesBox.getChildren().add(new Label("No duplicates found."));
-            if (!Settings.get().duplicateSHA256) {
-                duplicatesBox.getChildren().add(new Label(
-                        "Size-only matching. Enable SHA-256 in Settings for exact matching."));
-            }
+        if (!Settings.get().duplicateSHA256) {
+            duplicatesBox.getChildren().add(new Label("Duplicate detection is disabled."));
+            duplicatesBox.getChildren().add(new Label(
+                    "Enable SHA-256 in Settings (⚙) for exact content-based duplicate detection."));
             return;
         }
 
-        if (!Settings.get().duplicateSHA256) {
-            duplicatesBox.getChildren().add(new Label(
-                    "⚠ Fast mode: matching by size + first 8 KB hash. Enable SHA-256 in Settings for full content matching."));
+        var groups = FileAnalysis.findDuplicates(root);
+
+        if (groups.isEmpty()) {
+            duplicatesBox.getChildren().add(new Label("No duplicates found."));
+            return;
         }
+
+        duplicatesBox.getChildren().add(new Label(
+                "SHA-256 content hashing. Excludes: .git/, node_modules/, target/, ..."));
 
         long wasted = FileAnalysis.totalDuplicateWaste(groups);
         duplicatesBox.getChildren().add(new Label(

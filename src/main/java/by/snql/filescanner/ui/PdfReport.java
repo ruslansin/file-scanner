@@ -41,8 +41,12 @@ public class PdfReport {
             addFileTypes(doc, font, boldFont, root, y);
 
             var groups = FileAnalysis.findDuplicates(root);
-            if (!groups.isEmpty()) {
-                addDuplicates(doc, font, boldFont, monoFont, groups);
+            if (!groups.isEmpty() || Settings.get().duplicateSHA256) {
+                if (Settings.get().duplicateSHA256) {
+                    addDuplicates(doc, font, boldFont, monoFont, groups);
+                } else {
+                    addDuplicatesDisabled(doc, font, boldFont);
+                }
             }
 
             var emptyDirs = FileAnalysis.findEmptyDirs(root);
@@ -203,6 +207,20 @@ public class PdfReport {
             drawText(s, String.format("%.1f%%", pct), cols[3], y);
             y -= ROW_HEIGHT;
         }
+        s.close();
+    }
+
+    private static void addDuplicatesDisabled(PDDocument doc, PDType1Font font, PDType1Font bold) throws IOException {
+        var page = newPage(doc);
+        var s = new PDPageContentStream(doc, page);
+        float y = page.getMediaBox().getHeight() - MARGIN;
+
+        s.setFont(bold, 16);
+        drawText(s, "Duplicates", MARGIN, y);
+        y -= HEADER_HEIGHT + 5;
+        s.setFont(font, 11);
+        drawText(s, "Duplicate detection is disabled. Enable SHA-256 in Settings for exact content matching.",
+                MARGIN + 5, y);
         s.close();
     }
 

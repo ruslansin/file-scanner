@@ -56,6 +56,8 @@ public final class FileAnalysis {
     }
 
     public static List<DuplicateGroup> findDuplicates(FileNode root) {
+        if (!Settings.get().duplicateSHA256) return List.of();
+
         var bySize = new HashMap<Long, List<FileNode>>();
         for (var file : flattenFiles(root)) {
             if (file.getSize() == 0) continue;
@@ -64,7 +66,6 @@ public final class FileAnalysis {
         }
 
         var result = new ArrayList<DuplicateGroup>();
-        boolean useHash = Settings.get().duplicateSHA256;
 
         for (var entry : bySize.entrySet()) {
             var group = entry.getValue();
@@ -72,7 +73,7 @@ public final class FileAnalysis {
 
             var byHash = new HashMap<String, List<FileNode>>();
             for (var file : group) {
-                String hash = useHash ? hashFile(file) : quickHash(file);
+                String hash = hashFile(file);
                 byHash.computeIfAbsent(hash, k -> new ArrayList<>()).add(file);
             }
             for (var sub : byHash.values()) {
@@ -88,18 +89,6 @@ public final class FileAnalysis {
             result = new ArrayList<>(result.subList(0, MAX_GROUPS));
         }
         return result;
-    }
-
-    private static String quickHash(FileNode file) {
-        try (var in = Files.newInputStream(file.getPath())) {
-            var digest = MessageDigest.getInstance("SHA-256");
-            byte[] buf = new byte[8192];
-            int read = in.read(buf);
-            if (read > 0) digest.update(buf, 0, read);
-            return bytesToHex(digest.digest()) + ":" + file.getSize();
-        } catch (Exception e) {
-            return file.getPath().toString();
-        }
     }
 
     public static String commonPathPrefix(List<FileNode> files) {

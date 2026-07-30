@@ -667,7 +667,7 @@ public class MainWindow {
 
     private void showSettingsDialog() {
         var s = Settings.get();
-        var shaCb = new CheckBox("SHA-256 exact matching for duplicates");
+        var shaCb = new CheckBox("SHA-256 duplicate detection (slow, exact)");
         shaCb.setSelected(s.duplicateSHA256);
 
         var hiddenCb = new CheckBox("Show hidden files on startup");
@@ -709,7 +709,7 @@ public class MainWindow {
         depthField.setPrefWidth(60);
         form.add(depthField, 1, 6);
 
-        var note = new Label("SHA-256 is slow but exact. Off by default for speed.");
+        var note = new Label("Duplicate detection uses SHA-256. Disabled by default (slow on large scans).");
         note.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
         form.add(note, 0, 7, 2, 1);
 

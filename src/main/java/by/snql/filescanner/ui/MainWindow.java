@@ -617,6 +617,11 @@ public class MainWindow {
         for (var child : node.getChildren()) sortRecursive(child, comp);
     }
 
+    private void populateTree(FileNode root) {
+        treeView.setRoot(null);
+        updateTreeLive(root);
+    }
+
     private void updateTreeLive(FileNode root) {
         if (treeView.getRoot() == null) {
             treeView.setRoot(createLazyTreeItem(root));

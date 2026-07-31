@@ -395,7 +395,7 @@ public class MainWindow {
         scanner.scan(rootPath, p -> maybeUpdate(() -> progressBar.setProgress(p), lastUpdate),
                         partial -> Platform.runLater(() -> {
                             partial.sortChildren();
-                            populateTree(partial);
+                            updateTreeLive(partial);
                             treemapChart.setRoot(partial);
                             ringsChart.setRoot(partial);
                             sizeLabel.setText(formatSize(partial.getSize()));
@@ -411,7 +411,7 @@ public class MainWindow {
                         sizeLabel.setText(formatSize(root.getSize()));
                         updateCounts(root);
                         updateDiskInfo(rootPath);
-                        populateTree(root);
+                        updateTreeLive(root);
                         treemapChart.setRoot(root);
                         ringsChart.setRoot(root);
                         bottomTabs.setRoot(root);
@@ -617,10 +617,37 @@ public class MainWindow {
         for (var child : node.getChildren()) sortRecursive(child, comp);
     }
 
-    private void populateTree(FileNode root) {
-        var treeRoot = createLazyTreeItem(root);
-        treeRoot.setExpanded(true);
-        treeView.setRoot(treeRoot);
+    private void updateTreeLive(FileNode root) {
+        if (treeView.getRoot() == null) {
+            treeView.setRoot(createLazyTreeItem(root));
+            treeView.getRoot().setExpanded(true);
+            return;
+        }
+        mergeTreeNode(treeView.getRoot(), root);
+    }
+
+    private void mergeTreeNode(TreeItem<FileNode> item, FileNode fresh) {
+        if (item == null || fresh == null) return;
+        item.setValue(fresh);
+
+        var existing = new java.util.HashMap<String, TreeItem<FileNode>>();
+        for (var child : item.getChildren()) {
+            if (child.getValue() != null && !"Loading...".equals(child.getValue().getName())) {
+                existing.put(child.getValue().getName(), child);
+            }
+        }
+        item.getChildren().removeIf(c -> "Loading...".equals(c.getValue().getName()));
+
+        for (var freshChild : fresh.getChildren()) {
+            if (!freshChild.isDirectory()) continue;
+            var ex = existing.remove(freshChild.getName());
+            if (ex != null) {
+                mergeTreeNode(ex, freshChild);
+            } else {
+                var newItem = createLazyTreeItem(freshChild);
+                item.getChildren().add(newItem);
+            }
+        }
     }
 
     private TreeItem<FileNode> createLazyTreeItem(FileNode node) {

@@ -22,6 +22,7 @@ public class FileScanner {
     private final AtomicLong runningSize = new AtomicLong();
     private Consumer<FileNode> realtimeCallback;
     private long lastRealtime;
+    private FileNode rootNode;
 
     public void cancel() {
         cancelled = true;
@@ -39,6 +40,7 @@ public class FileScanner {
                                               Consumer<FileNode> realtimeCb) {
         this.realtimeCallback = realtimeCb;
         this.lastRealtime = 0;
+        this.rootNode = null;
         cancelled = false;
         runningSize.set(0);
         return CompletableFuture.supplyAsync(() -> {
@@ -49,49 +51,40 @@ public class FileScanner {
                 var processed = new AtomicLong(0);
                 var inodeMap = new HashMap<Object, Path>();
 
-                var node = buildTree(root, discovered, processed, progressCallback, inodeMap);
-                if (node != null) {
-                    node.sortChildren();
-                }
-                return node;
+                rootNode = createDirNode(root, discovered, processed);
+                scanChildren(root, rootNode, discovered, processed, progressCallback, inodeMap);
+
+                if (cancelled) return null;
+                rootNode.sortChildren();
+                return rootNode;
             } catch (IOException e) {
                 throw new RuntimeException("Scan failed", e);
             }
         }, r -> Thread.ofVirtual().start(r));
     }
 
-    private FileNode buildTree(Path path, AtomicLong discovered, AtomicLong processed,
-                                Consumer<Double> progressCallback,
-                                Map<Object, Path> inodeMap) throws IOException {
-        if (cancelled) return null;
-
+    private FileNode createDirNode(Path path, AtomicLong discovered, AtomicLong processed)
+            throws IOException {
         processed.incrementAndGet();
-        long proc = processed.get();
-        long disc = discovered.get();
-        if (proc % 500 == 0 || proc >= disc) {
-            progressCallback.accept((double) proc / Math.max(disc, 1));
-        }
-
-        boolean isDir = Files.isDirectory(path);
         var fileName = path.getFileName() != null
                 ? path.getFileName().toString() : path.toString();
-        long initialSize = isDir ? 0 : safeFileSize(path);
-        var node = new FileNode(path, fileName, isDir, initialSize);
-
-        if (!isDir) {
-            runningSize.addAndGet(initialSize);
-            detectLinks(path, node, inodeMap);
-            return node;
-        }
-
-        if (isDir && Settings.get().projectScanEnabled && ProjectType.isArtifactName(fileName)) {
+        var node = new FileNode(path, fileName, true, 0);
+        if (Settings.get().projectScanEnabled && ProjectType.isArtifactName(fileName)) {
             var parentType = ProjectType.detect(path.getParent());
             if (parentType.isPresent() && parentType.get().artifacts().contains(fileName)) {
                 node.setBuildArtifact(true);
             }
         }
+        return node;
+    }
 
-        try (var stream = Files.list(path)) {
+    private void scanChildren(Path parentPath, FileNode parentNode,
+                               AtomicLong discovered, AtomicLong processed,
+                               Consumer<Double> progressCallback,
+                               Map<Object, Path> inodeMap) throws IOException {
+        if (cancelled) return;
+
+        try (var stream = Files.list(parentPath)) {
             var entries = stream.toList();
             discovered.addAndGet(entries.size());
 
@@ -102,39 +95,48 @@ public class FileScanner {
                     continue;
                 }
 
-                if (!Files.isDirectory(entry)) {
-                    var childName = entry.getFileName() != null
-                            ? entry.getFileName().toString() : entry.toString();
-                    long size = safeFileSize(entry);
-                    var child = new FileNode(entry, childName, false, size);
-                    detectLinks(entry, child, inodeMap);
-                    runningSize.addAndGet(size);
-                    node.addChild(child);
-                    processed.incrementAndGet();
-                } else {
-                    var child = buildTree(entry, discovered, processed, progressCallback, inodeMap);
-                    if (child != null) {
-                        detectLinks(entry, child, inodeMap);
-                        node.addChild(child);
-                    }
+                var child = processEntry(entry, discovered, processed, progressCallback, inodeMap);
+                if (child != null) {
+                    parentNode.addChild(child);
+                    emitIfTime();
                 }
             }
         } catch (IOException ignored) {
         }
-
-        if (cancelled) return null;
-
-        emitRealtime(node);
-
-        return node;
     }
 
-    private void emitRealtime(FileNode node) {
+    private FileNode processEntry(Path path, AtomicLong discovered, AtomicLong processed,
+                                   Consumer<Double> progressCallback,
+                                   Map<Object, Path> inodeMap) throws IOException {
+        processed.incrementAndGet();
+        long proc = processed.get();
+        long disc = discovered.get();
+        if (proc % 500 == 0 || proc >= disc) {
+            progressCallback.accept((double) proc / Math.max(disc, 1));
+        }
+
+        if (!Files.isDirectory(path)) {
+            var fileName = path.getFileName() != null
+                    ? path.getFileName().toString() : path.toString();
+            long size = safeFileSize(path);
+            var node = new FileNode(path, fileName, false, size);
+            detectLinks(path, node, inodeMap);
+            runningSize.addAndGet(size);
+            return node;
+        }
+
+        var dirNode = createDirNode(path, discovered, processed);
+        scanChildren(path, dirNode, discovered, processed, progressCallback, inodeMap);
+        if (cancelled) return null;
+        dirNode.sortChildren();
+        return dirNode;
+    }
+
+    private void emitIfTime() {
         long now = System.currentTimeMillis();
-        if (realtimeCallback != null && now - lastRealtime >= 300) {
+        if (realtimeCallback != null && rootNode != null && now - lastRealtime >= 300) {
             lastRealtime = now;
-            var copy = shallowCopy(node);
-            realtimeCallback.accept(copy);
+            realtimeCallback.accept(shallowCopy(rootNode));
         }
     }
 

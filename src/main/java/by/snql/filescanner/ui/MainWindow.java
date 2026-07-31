@@ -624,32 +624,31 @@ public class MainWindow {
 
     private void updateTreeLive(FileNode root) {
         if (treeView.getRoot() == null) {
-            treeView.setRoot(createLazyTreeItem(root));
-            treeView.getRoot().setExpanded(true);
-            return;
+            var treeRoot = new TreeItem<>(root);
+            treeRoot.setExpanded(true);
+            treeView.setRoot(treeRoot);
+        } else {
+            treeView.getRoot().setValue(root);
+            mergeChildren(treeView.getRoot(), root);
         }
-        mergeTreeNode(treeView.getRoot(), root);
     }
 
-    private void mergeTreeNode(TreeItem<FileNode> item, FileNode fresh) {
-        if (item == null || fresh == null) return;
-        item.setValue(fresh);
-
-        var existing = new java.util.HashMap<String, TreeItem<FileNode>>();
+    private void mergeChildren(TreeItem<FileNode> item, FileNode fresh) {
+        var existing = new java.util.LinkedHashMap<String, TreeItem<FileNode>>();
         for (var child : item.getChildren()) {
-            if (child.getValue() != null && !"Loading...".equals(child.getValue().getName())) {
+            if (child.getValue() != null) {
                 existing.put(child.getValue().getName(), child);
             }
         }
-        item.getChildren().removeIf(c -> "Loading...".equals(c.getValue().getName()));
 
         for (var freshChild : fresh.getChildren()) {
             if (!freshChild.isDirectory()) continue;
             var ex = existing.remove(freshChild.getName());
             if (ex != null) {
-                mergeTreeNode(ex, freshChild);
+                ex.setValue(freshChild);
+                mergeChildren(ex, freshChild);
             } else {
-                var newItem = createLazyTreeItem(freshChild);
+                var newItem = new TreeItem<>(freshChild);
                 item.getChildren().add(newItem);
             }
         }

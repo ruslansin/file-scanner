@@ -2,6 +2,7 @@ package by.snql.filescanner.ui;
 
 import by.snql.filescanner.model.FileNode;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,77 +14,133 @@ public final class TreemapLayout {
     public record Rect(double x, double y, double w, double h, FileNode node) {}
 
     public static Rect[] compute(FileNode root, double width, double height) {
-        return layoutRect(root, 0, 0, width, height);
+        if (root == null || width <= 0 || height <= 0) return new Rect[0];
+        var rects = new ArrayList<Rect>();
+        layout(root, 0, 0, width, height, rects);
+        return rects.toArray(new Rect[0]);
     }
 
-    private static Rect[] layoutRect(FileNode node, double x, double y, double w, double h) {
-        if (node == null || w <= 0 || h <= 0) return new Rect[0];
+    private static void layout(FileNode node, double x, double y, double w, double h,
+                                List<Rect> out) {
+        double pad = 2;
+        double ix = x + pad;
+        double iy = y + pad;
+        double iw = w - pad * 2;
+        double ih = h - pad * 2;
 
-        int totalRects = 1;
-        for (var child : node.getChildren()) {
-            totalRects += countDescendants(child);
+        if (iw < 5 || ih < 5) return;
+        if (node.getSize() == 0 && !node.getChildren().isEmpty()) {
         }
-        var rects = new Rect[totalRects];
-        rects[0] = new Rect(x, y, w, h, node);
 
-        if (node.isLeaf() || node.getChildren().isEmpty()) return rects;
+        out.add(new Rect(x, y, w, h, node));
 
-        double padding = 3;
-        double ix = x + padding;
-        double iy = y + padding;
-        double iw = w - padding * 2;
-        double ih = h - padding * 2;
-        if (iw <= 0 || ih <= 0) return rects;
-
-        var map = squarify(node.getChildren(), ix, iy, iw, ih);
-        int idx = 1;
-        for (var child : node.getChildren()) {
-            var r = map.get(child);
-            var subRects = layoutRect(child, r.x, r.y, r.w, r.h);
-            System.arraycopy(subRects, 0, rects, idx, subRects.length);
-            idx += subRects.length;
+        var dirs = new ArrayList<FileNode>();
+        var files = new ArrayList<FileNode>();
+        for (var c : node.getChildren()) {
+            if (c.isDirectory()) dirs.add(c);
+            else files.add(c);
         }
-        return rects;
-    }
 
-    static Map<FileNode, Rect> squarify(List<FileNode> children,
-                                         double x, double y, double w, double h) {
-        var map = new LinkedHashMap<FileNode, Rect>();
-        long total = children.stream().mapToLong(FileNode::getSize).sum();
-        if (total == 0) {
-            double perChild = w / Math.max(1, children.size());
-            for (int i = 0; i < children.size(); i++) {
-                map.put(children.get(i), new Rect(x + i * perChild, y, perChild, h, children.get(i)));
+        var items = new ArrayList<FileNode>();
+        items.addAll(dirs);
+        items.addAll(files);
+
+        if (items.isEmpty()) return;
+
+        long totalSize = items.stream().mapToLong(FileNode::getSize).sum();
+        if (totalSize == 0) {
+            double perW = iw / items.size();
+            for (int i = 0; i < items.size(); i++) {
+                layout(items.get(i), ix + i * perW, iy, perW, ih, out);
             }
-            return map;
+            return;
         }
 
-        boolean vertical = w >= h;
-        double pos = vertical ? x : y;
-        double length = vertical ? w : h;
-        double otherDim = vertical ? h : w;
-        double otherPos = vertical ? y : x;
+        double minSize = totalSize * 0.001;
+        var visible = items.stream()
+                .filter(f -> f.getSize() >= minSize)
+                .toList();
 
-        for (var child : children) {
-            double fraction = (double) child.getSize() / total;
-            double size = length * fraction;
-            size = Math.max(size, 4);
-            if (vertical) {
-                map.put(child, new Rect(pos, otherPos, size, otherDim, child));
-            } else {
-                map.put(child, new Rect(otherPos, pos, otherDim, size, child));
+        if (visible.isEmpty()) {
+            double perW = iw / items.size();
+            for (int i = 0; i < items.size(); i++) {
+                layout(items.get(i), ix + i * perW, iy, perW, ih, out);
             }
-            pos += size;
+            return;
         }
-        return map;
+
+        squarify(visible, ix, iy, iw, ih, out);
     }
 
-    public static int countDescendants(FileNode node) {
-        int count = 1;
-        for (var child : node.getChildren()) {
-            count += countDescendants(child);
+    private static void squarify(List<FileNode> items, double x, double y, double w, double h,
+                                  List<Rect> out) {
+        if (items.isEmpty()) return;
+        long total = items.stream().mapToLong(FileNode::getSize).sum();
+        if (total == 0) return;
+
+        double area = w * h;
+        double scale = area / total;
+        double totalFraction = 0;
+        var row = new ArrayList<FileNode>();
+
+        for (var child : items) {
+            double fraction = child.getSize() * scale / area;
+            row.add(child);
+            totalFraction += fraction;
+
+            double rowSize = totalFraction * (w >= h ? h : w);
+            double worstAspect = worstAspectRatio(row, rowSize, w >= h ? w : h, total);
+
+            if (row.size() > 1 && (worstAspect > worstAspectRatio(
+                    row.subList(0, row.size() - 1),
+                    (totalFraction - fraction) * (w >= h ? h : w),
+                    w >= h ? w : h, total))) {
+                row.remove(row.size() - 1);
+                layoutRow(row, x, y, w, h, totalFraction - fraction, out, total);
+                double consumed = (totalFraction - fraction) * (w >= h ? w : h);
+                if (w >= h) {
+                    squarify(List.of(child), x + consumed, y, w - consumed, h, out);
+                } else {
+                    squarify(List.of(child), x, y + consumed, w, h - consumed, out);
+                }
+                return;
+            }
         }
-        return count;
+        layoutRow(row, x, y, w, h, totalFraction, out, total);
+    }
+
+    private static void layoutRow(List<FileNode> row, double x, double y, double w, double h,
+                                   double totalFraction, List<Rect> out, long total) {
+        if (row.isEmpty()) return;
+        double consumed = totalFraction * (w >= h ? h : w);
+        long rowSize = row.stream().mapToLong(FileNode::getSize).sum();
+
+        if (w >= h) {
+            double ry = y;
+            for (var child : row) {
+                double frac = rowSize > 0 ? (double) child.getSize() / rowSize * consumed : consumed / row.size();
+                double childH = Math.max(frac, 4);
+                layout(child, x, ry, consumed, childH, out);
+                ry += childH;
+            }
+        } else {
+            double rx = x;
+            for (var child : row) {
+                double frac = rowSize > 0 ? (double) child.getSize() / rowSize * consumed : consumed / row.size();
+                double childW = Math.max(frac, 4);
+                layout(child, rx, y, childW, consumed, out);
+                rx += childW;
+            }
+        }
+    }
+
+    private static double worstAspectRatio(List<FileNode> row, double side, double length, long total) {
+        if (row.isEmpty()) return Double.MAX_VALUE;
+        long rowSum = row.stream().mapToLong(FileNode::getSize).sum();
+        double s = (double) rowSum / (total > 0 ? total : 1) * length;
+        double aspectW = Math.max(side, s) / Math.min(side, s);
+        double aspectH = Math.max(s, side) / Math.min(s, side);
+        return Math.max(aspectW, aspectH);
     }
 
     public static int displayDepth(FileNode node) {
@@ -94,5 +151,27 @@ public final class TreemapLayout {
             n = n.getChildren().get(0);
         }
         return Math.min(d, 4);
+    }
+
+    public static int countDescendants(FileNode node) {
+        int count = 1;
+        for (var child : node.getChildren()) {
+            count += countDescendants(child);
+        }
+        return count;
+    }
+
+    static Map<FileNode, Rect> squarify(List<FileNode> children, double x, double y, double w, double h) {
+        var dummy = new FileNode(null, "tmp", true, 1000);
+        var sorted = new ArrayList<>(children);
+        sorted.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+        for (var c : sorted) dummy.addChild(c);
+        var out = new ArrayList<Rect>();
+        layout(dummy, x, y, w, h, out);
+        var map = new LinkedHashMap<FileNode, Rect>();
+        for (var r : out) {
+            if (r.node() != dummy) map.putIfAbsent(r.node(), r);
+        }
+        return map;
     }
 }

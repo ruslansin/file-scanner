@@ -7,6 +7,8 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.ArcType;
+import javafx.scene.text.Font;
+import javafx.scene.text.TextAlignment;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,21 +19,22 @@ public class RingsChart extends StackPane {
     private final Canvas canvas;
     private FileNode root;
     private Consumer<FileNode> onNodeClicked;
-    private Arc[] currentArcs;
+    private RingSegment[] currentSegments;
 
-    private static final double RING_WIDTH = 30;
-    private static final double CENTER_RADIUS = 35;
-    private static final int MAX_RINGS = 8;
+    private static final double RING_WIDTH = 36;
+    private static final double CENTER_RADIUS = 60;
+    private static final int MAX_RINGS = 6;
 
     private static final Color[] PALETTE = {
             Color.rgb(0x34, 0x98, 0xDB), Color.rgb(0x2E, 0xCC, 0x71),
             Color.rgb(0xE7, 0x4C, 0x3C), Color.rgb(0x9B, 0x59, 0xB6),
             Color.rgb(0xF3, 0x9C, 0x12), Color.rgb(0x1A, 0xBC, 0x9C),
-            Color.rgb(0xE6, 0x7E, 0x22), Color.rgb(0x34, 0x49, 0x5E)
+            Color.rgb(0xE6, 0x7E, 0x22), Color.rgb(0x34, 0x49, 0x5E),
+            Color.rgb(0xC0, 0x39, 0x2B), Color.rgb(0x8E, 0x44, 0xAD)
     };
 
-    private record Arc(double centerX, double centerY, double innerR, double outerR,
-                       double startAngle, double sweepAngle, FileNode node) {}
+    private record RingSegment(double centerX, double centerY, double innerR, double outerR,
+                                double startAngle, double sweepAngle, FileNode node, String label) {}
 
     public RingsChart() {
         canvas = new Canvas();
@@ -42,6 +45,7 @@ public class RingsChart extends StackPane {
         setMinSize(200, 200);
 
         canvas.setOnMouseClicked(this::onMouseClicked);
+        canvas.setOnMouseMoved(this::onMouseMoved);
 
         widthProperty().addListener((obs, old, w) -> redraw());
         heightProperty().addListener((obs, old, h) -> redraw());
@@ -58,7 +62,7 @@ public class RingsChart extends StackPane {
 
     public void clear() {
         root = null;
-        currentArcs = null;
+        currentSegments = null;
         canvas.getGraphicsContext2D().clearRect(0, 0, canvas.getWidth(), canvas.getHeight());
     }
 
@@ -71,19 +75,19 @@ public class RingsChart extends StackPane {
         double cy = canvas.getHeight() / 2;
         double maxR = Math.min(cx, cy) - 10;
 
-        currentArcs = computeArcs(root, cx, cy, maxR);
-        drawArcs(gc, currentArcs);
+        currentSegments = computeSegments(root, cx, cy, maxR);
+        draw(gc, currentSegments);
     }
 
-    private Arc[] computeArcs(FileNode node, double cx, double cy, double maxR) {
-        var arcs = new ArrayList<Arc>();
-        computeRing(node, cx, cy, 0, 0, 360, maxR, arcs);
-        return arcs.toArray(new Arc[0]);
+    private RingSegment[] computeSegments(FileNode node, double cx, double cy, double maxR) {
+        var segs = new ArrayList<RingSegment>();
+        computeRing(node, cx, cy, 0, 0, 360, maxR, segs);
+        return segs.toArray(new RingSegment[0]);
     }
 
     private void computeRing(FileNode node, double cx, double cy,
                              int depth, double startAngle, double sweepAngle,
-                             double maxR, List<Arc> result) {
+                             double maxR, List<RingSegment> result) {
         if (depth >= MAX_RINGS || node == null || sweepAngle <= 0) return;
 
         double innerR = depth == 0 ? 0 : CENTER_RADIUS + (depth - 1) * RING_WIDTH;
@@ -91,111 +95,143 @@ public class RingsChart extends StackPane {
 
         if (outerR > maxR) return;
 
-        result.add(new Arc(cx, cy, innerR, outerR, startAngle, sweepAngle, node));
+        result.add(new RingSegment(cx, cy, innerR, outerR, startAngle, sweepAngle, node,
+                node.getName()));
 
         if (node.isLeaf() || node.getChildren().isEmpty()) return;
 
-        long total = node.getChildren().stream().mapToLong(FileNode::getSize).sum();
+        var children = new ArrayList<>(node.getChildren());
+        children.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+
+        long total = children.stream().mapToLong(FileNode::getSize).sum();
         if (total == 0) return;
 
         double angle = startAngle;
-        for (var child : node.getChildren()) {
-            if (child.getSize() == 0) continue;
+        var prevAngles = new ArrayList<Double>();
+        for (int i = 0; i < children.size(); i++) {
+            var child = children.get(i);
             double childSweep = (double) child.getSize() / total * sweepAngle;
-            if (childSweep < 0.5) childSweep = 0.5;
-
+            if (childSweep < 2.0) continue;
+            prevAngles.add(angle);
             computeRing(child, cx, cy, depth + 1, angle, childSweep, maxR, result);
             angle += childSweep;
         }
     }
 
-    private void drawArcs(GraphicsContext gc, Arc[] arcs) {
-        for (var arc : arcs) {
-            if (arc.node.getSize() == 0 && arc.node.isDirectory()) continue;
+    private void draw(GraphicsContext gc, RingSegment[] segs) {
+        for (var seg : segs) {
+            if (seg.node.getSize() == 0 && seg.node.isDirectory()) continue;
 
-            Color fill = colorFor(arc.node, arc.innerR, arc.outerR, arc.centerX, arc.centerY);
+            Color fill = colorFor(seg.node, seg.innerR);
             Color stroke = fill.darker();
 
             gc.setFill(fill);
             gc.setStroke(stroke);
             gc.setLineWidth(0.5);
 
-            double outerR = arc.outerR;
-            if (arc.innerR == 0) {
-                gc.fillOval(arc.centerX - outerR, arc.centerY - outerR,
-                        outerR * 2, outerR * 2);
-                gc.strokeOval(arc.centerX - outerR, arc.centerY - outerR,
-                        outerR * 2, outerR * 2);
+            if (seg.innerR == 0) {
+                double r = seg.outerR;
+                gc.fillOval(seg.centerX - r, seg.centerY - r, r * 2, r * 2);
+                gc.strokeOval(seg.centerX - r, seg.centerY - r, r * 2, r * 2);
             } else {
-                gc.fillArc(arc.centerX - outerR, arc.centerY - outerR,
-                        outerR * 2, outerR * 2,
-                        arc.startAngle, arc.sweepAngle, ArcType.ROUND);
-                gc.strokeArc(arc.centerX - outerR, arc.centerY - outerR,
-                        outerR * 2, outerR * 2,
-                        arc.startAngle, arc.sweepAngle, ArcType.ROUND);
+                double r = seg.outerR;
+                gc.fillArc(seg.centerX - r, seg.centerY - r,
+                        r * 2, r * 2,
+                        seg.startAngle, seg.sweepAngle, ArcType.ROUND);
+                gc.strokeArc(seg.centerX - r, seg.centerY - r,
+                        r * 2, r * 2,
+                        seg.startAngle, seg.sweepAngle, ArcType.ROUND);
 
-                if (arc.innerR > 0 && arc.sweepAngle > 5) {
-                    gc.setFill(Color.WHITE);
-                    gc.setFont(javafx.scene.text.Font.font("SansSerif", 10));
-
-                    double midAngle = Math.toRadians(arc.startAngle + arc.sweepAngle / 2);
-                    double textR = (arc.innerR + outerR) / 2;
-                    double tx = arc.centerX + textR * Math.cos(midAngle - Math.PI / 2);
-                    double ty = arc.centerY + textR * Math.sin(midAngle - Math.PI / 2);
-
-                    String label = arc.node.getName();
-                    String size = MainWindow.formatSize(arc.node.getSize());
-                    double textW = label.length() * 5;
-                    if (textW < arc.sweepAngle / 360 * 2 * Math.PI * textR * 0.7) {
-                        String full = label + "  " + size;
-                        double fullW = full.length() * 5;
-                        if (fullW < arc.sweepAngle / 360 * 2 * Math.PI * textR * 0.7) {
-                            gc.fillText(full, tx - fullW / 2, ty + 4);
-                        } else {
-                            gc.fillText(label, tx - textW / 2, ty + 4);
-                        }
-                    }
-                }
+                drawArcLabel(gc, seg);
             }
+        }
 
+        if (root != null) {
+            double r = CENTER_RADIUS * 0.7;
             gc.setFill(Color.WHITE);
+            gc.setFont(Font.font("SansSerif", 11));
+            gc.setTextAlign(TextAlignment.CENTER);
+            String label = root.getName();
+            if (label.length() > 10) label = label.substring(0, 9) + "…";
+            gc.fillText(label, root != null ? canvas.getWidth() / 2 : 0,
+                    root != null ? canvas.getHeight() / 2 + 4 : 0);
+            gc.setTextAlign(TextAlignment.LEFT);
         }
     }
 
-    private Color colorFor(FileNode node, double innerR, double outerR, double cx, double cy) {
+    private void drawArcLabel(GraphicsContext gc, RingSegment seg) {
+        if (seg.sweepAngle < 5) return;
+
+        double midAngle = Math.toRadians(seg.startAngle + seg.sweepAngle / 2);
+        double textR = (seg.innerR + seg.outerR) / 2;
+
+        gc.setFill(Color.WHITE);
+        gc.setFont(Font.font("SansSerif", 10));
+
+        String label = seg.node.getName();
+        String size = MainWindow.formatSize(seg.node.getSize());
+
+        double arcLen = 2 * Math.PI * textR * seg.sweepAngle / 360;
+        double charW = gc.getFont().getSize() * 0.5;
+
+        double tx = seg.centerX + textR * Math.cos(midAngle - Math.PI / 2);
+        double ty = seg.centerY + textR * Math.sin(midAngle - Math.PI / 2);
+
+        if (arcLen > label.length() * charW + 20) {
+            String full = label + "  " + size;
+            if (arcLen > full.length() * charW) {
+                gc.fillText(full, tx, ty + 4);
+            } else {
+                gc.fillText(label, tx, ty + 4);
+            }
+        }
+    }
+
+    private Color colorFor(FileNode node, double innerR) {
         if (node.isDirectory()) {
             int hash = node.getName().hashCode();
             int idx = Math.abs(hash) % PALETTE.length;
-            return PALETTE[idx].deriveColor(1, 0.7, 1, 1);
+            return PALETTE[idx].deriveColor(1, 0.65, 1, 1);
         }
-        return FileTypeCategory.forFile(node.getName()).color();
+        return FileTypeCategory.forFile(node.getName()).color().deriveColor(1, 0.9, 1, 1);
     }
 
     private void onMouseClicked(MouseEvent e) {
-        if (currentArcs == null) return;
+        if (currentSegments == null) return;
+        double dx = e.getX(), dy = e.getY();
 
-        double dx = e.getX();
-        double dy = e.getY();
+        for (var seg : currentSegments) {
+            if (!seg.node.isDirectory() || seg.innerR == 0) continue;
+            double dist = Math.sqrt(Math.pow(dx - seg.centerX, 2) + Math.pow(dy - seg.centerY, 2));
+            if (dist < seg.innerR || dist > seg.outerR) continue;
 
-        for (var arc : currentArcs) {
-            if (!arc.node.isDirectory() || arc.innerR == 0) continue;
+            double angle = Math.toDegrees(Math.atan2(dx - seg.centerX, -(dy - seg.centerY)));
+            if (angle < 0) angle += 360;
+            if (angle >= seg.startAngle && angle <= seg.startAngle + seg.sweepAngle) {
+                if (onNodeClicked != null) onNodeClicked.accept(seg.node);
+                return;
+            }
+        }
+    }
 
-            double dist = Math.sqrt(Math.pow(dx - arc.centerX, 2) + Math.pow(dy - arc.centerY, 2));
-
-            if (dist >= arc.innerR && dist <= arc.outerR) {
-                double angle = Math.toDegrees(Math.atan2(dx - arc.centerX, -(dy - arc.centerY)));
+    private void onMouseMoved(MouseEvent e) {
+        if (currentSegments == null) {
+            canvas.setCursor(javafx.scene.Cursor.DEFAULT);
+            return;
+        }
+        double dx = e.getX(), dy = e.getY();
+        for (var seg : currentSegments) {
+            if (!seg.node.isDirectory() || seg.innerR == 0) continue;
+            double dist = Math.sqrt(Math.pow(dx - seg.centerX, 2) + Math.pow(dy - seg.centerY, 2));
+            if (dist >= seg.innerR && dist <= seg.outerR) {
+                double angle = Math.toDegrees(Math.atan2(dx - seg.centerX, -(dy - seg.centerY)));
                 if (angle < 0) angle += 360;
-
-                double start = arc.startAngle;
-                double end = arc.startAngle + arc.sweepAngle;
-
-                if (angle >= start && angle <= end) {
-                    if (onNodeClicked != null) {
-                        onNodeClicked.accept(arc.node);
-                    }
+                if (angle >= seg.startAngle && angle <= seg.startAngle + seg.sweepAngle) {
+                    canvas.setCursor(javafx.scene.Cursor.HAND);
                     return;
                 }
             }
         }
+        canvas.setCursor(javafx.scene.Cursor.DEFAULT);
     }
 }

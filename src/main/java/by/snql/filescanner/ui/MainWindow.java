@@ -411,6 +411,8 @@ public class MainWindow {
                         treemapChart.setRoot(root);
                         ringsChart.setRoot(root);
                         bottomTabs.setRoot(root);
+                        Settings.get().lastScannedPath = rootPath.toString();
+                        Settings.get().save();
                     }
                     progressBar.setVisible(false);
                     cancelButton.setVisible(false);
@@ -769,5 +771,12 @@ public class MainWindow {
 
     public void show() {
         stage.show();
+        var lastPath = Settings.get().lastScannedPath;
+        if (lastPath != null && !lastPath.isEmpty()) {
+            var path = Path.of(lastPath);
+            if (Files.isDirectory(path)) {
+                scan(path);
+            }
+        }
     }
 }

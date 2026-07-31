@@ -23,6 +23,7 @@ public class Settings {
     public List<String> scanRoots = new ArrayList<>();
     public boolean projectScanEnabled = true;
     public int projectScanDepth = 5;
+    public String lastScannedPath = "";
 
     private static Settings instance;
 

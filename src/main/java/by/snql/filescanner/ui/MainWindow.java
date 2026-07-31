@@ -393,9 +393,13 @@ public class MainWindow {
 
         var lastUpdate = new long[]{0};
         scanner.scan(rootPath, p -> maybeUpdate(() -> progressBar.setProgress(p), lastUpdate),
-                        sp -> maybeUpdate(() -> statusLabel.setText(String.format(
-                                "Scanning: %s (%s found, %s)",
-                                rootPath, sp.filesDiscovered(), formatSize(sp.totalSizeSoFar()))), lastUpdate))
+                        partial -> Platform.runLater(() -> {
+                            partial.sortChildren();
+                            populateTree(partial);
+                            treemapChart.setRoot(partial);
+                            ringsChart.setRoot(partial);
+                            sizeLabel.setText(formatSize(partial.getSize()));
+                        }))
                 .thenAccept(root -> Platform.runLater(() -> {
                     progressBar.setProgress(1.0);
                     if (root == null) {
@@ -413,6 +417,7 @@ public class MainWindow {
                         bottomTabs.setRoot(root);
                         Settings.get().lastScannedPath = rootPath.toString();
                         Settings.get().save();
+                        new Thread(() -> CacheManager.saveLastScan(root)).start();
                     }
                     progressBar.setVisible(false);
                     cancelButton.setVisible(false);
@@ -771,12 +776,19 @@ public class MainWindow {
 
     public void show() {
         stage.show();
-        var lastPath = Settings.get().lastScannedPath;
-        if (lastPath != null && !lastPath.isEmpty()) {
-            var path = Path.of(lastPath);
-            if (Files.isDirectory(path)) {
-                scan(path);
-            }
+        var tree = CacheManager.loadLastScan();
+        if (tree != null) {
+            currentRoot = tree;
+            scannedRootPath = tree.getPath();
+            applySort(tree);
+            statusLabel.setText("Loaded: " + tree.getPath());
+            sizeLabel.setText(formatSize(tree.getSize()));
+            updateCounts(tree);
+            updateDiskInfo(tree.getPath());
+            populateTree(tree);
+            treemapChart.setRoot(tree);
+            ringsChart.setRoot(tree);
+            bottomTabs.setRoot(tree);
         }
     }
 }

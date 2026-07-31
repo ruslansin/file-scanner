@@ -8,10 +8,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -23,6 +20,8 @@ public class FileScanner {
     private volatile boolean cancelled;
     private boolean includeHidden = true;
     private final AtomicLong runningSize = new AtomicLong();
+    private Consumer<FileNode> realtimeCallback;
+    private long lastRealtime;
 
     public void cancel() {
         cancelled = true;
@@ -37,7 +36,9 @@ public class FileScanner {
     }
 
     public CompletableFuture<FileNode> scan(Path root, Consumer<Double> progressCallback,
-                                              Consumer<ScanProgress> detailCallback) {
+                                              Consumer<FileNode> realtimeCb) {
+        this.realtimeCallback = realtimeCb;
+        this.lastRealtime = 0;
         cancelled = false;
         runningSize.set(0);
         return CompletableFuture.supplyAsync(() -> {
@@ -48,7 +49,7 @@ public class FileScanner {
                 var processed = new AtomicLong(0);
                 var inodeMap = new HashMap<Object, Path>();
 
-                var node = buildTree(root, discovered, processed, progressCallback, detailCallback, inodeMap);
+                var node = buildTree(root, discovered, processed, progressCallback, inodeMap);
                 if (node != null) {
                     node.sortChildren();
                 }
@@ -60,7 +61,7 @@ public class FileScanner {
     }
 
     private FileNode buildTree(Path path, AtomicLong discovered, AtomicLong processed,
-                                Consumer<Double> progressCallback, Consumer<ScanProgress> detailCallback,
+                                Consumer<Double> progressCallback,
                                 Map<Object, Path> inodeMap) throws IOException {
         if (cancelled) return null;
 
@@ -69,64 +70,83 @@ public class FileScanner {
         long disc = discovered.get();
         if (proc % 500 == 0 || proc >= disc) {
             progressCallback.accept((double) proc / Math.max(disc, 1));
-            if (detailCallback != null && proc % 1000 == 0) {
-                detailCallback.accept(new ScanProgress(
-                        (double) proc / Math.max(disc, 1), disc, proc, runningSize.get()));
-            }
         }
 
         boolean isDir = Files.isDirectory(path);
-        List<FileNode> children = new ArrayList<>();
-
-        if (isDir) {
-            try (var stream = Files.list(path)) {
-                var entries = stream.toList();
-                discovered.addAndGet(entries.size());
-
-                for (var entry : entries) {
-                    if (cancelled) break;
-                    if (!includeHidden && isHidden(entry)) {
-                        discovered.decrementAndGet();
-                        continue;
-                    }
-
-                    if (!Files.isDirectory(entry)) {
-                        var fileName = entry.getFileName() != null
-                                ? entry.getFileName().toString() : entry.toString();
-                        long size = safeFileSize(entry);
-                        var child = new FileNode(entry, fileName, false, size);
-                        detectLinks(entry, child, inodeMap);
-                        runningSize.addAndGet(size);
-                        children.add(child);
-                        processed.incrementAndGet();
-                    } else {
-                        var child = buildTree(entry, discovered, processed, progressCallback, detailCallback, inodeMap);
-                        if (child != null) {
-                            detectLinks(entry, child, inodeMap);
-                            children.add(child);
-                        }
-                    }
-                }
-            } catch (IOException ignored) {
-            }
-        }
-
-        if (cancelled) return null;
-
         var fileName = path.getFileName() != null
                 ? path.getFileName().toString() : path.toString();
         long initialSize = isDir ? 0 : safeFileSize(path);
         var node = new FileNode(path, fileName, isDir, initialSize);
+
+        if (!isDir) {
+            runningSize.addAndGet(initialSize);
+            detectLinks(path, node, inodeMap);
+            return node;
+        }
+
         if (isDir && Settings.get().projectScanEnabled && ProjectType.isArtifactName(fileName)) {
             var parentType = ProjectType.detect(path.getParent());
             if (parentType.isPresent() && parentType.get().artifacts().contains(fileName)) {
                 node.setBuildArtifact(true);
             }
         }
-        for (var child : children) {
-            node.addChild(child);
+
+        try (var stream = Files.list(path)) {
+            var entries = stream.toList();
+            discovered.addAndGet(entries.size());
+
+            for (var entry : entries) {
+                if (cancelled) break;
+                if (!includeHidden && isHidden(entry)) {
+                    discovered.decrementAndGet();
+                    continue;
+                }
+
+                if (!Files.isDirectory(entry)) {
+                    var childName = entry.getFileName() != null
+                            ? entry.getFileName().toString() : entry.toString();
+                    long size = safeFileSize(entry);
+                    var child = new FileNode(entry, childName, false, size);
+                    detectLinks(entry, child, inodeMap);
+                    runningSize.addAndGet(size);
+                    node.addChild(child);
+                    processed.incrementAndGet();
+                } else {
+                    var child = buildTree(entry, discovered, processed, progressCallback, inodeMap);
+                    if (child != null) {
+                        detectLinks(entry, child, inodeMap);
+                        node.addChild(child);
+                    }
+                }
+            }
+        } catch (IOException ignored) {
         }
+
+        if (cancelled) return null;
+
+        emitRealtime(node);
+
         return node;
+    }
+
+    private void emitRealtime(FileNode node) {
+        long now = System.currentTimeMillis();
+        if (realtimeCallback != null && now - lastRealtime >= 300) {
+            lastRealtime = now;
+            var copy = shallowCopy(node);
+            realtimeCallback.accept(copy);
+        }
+    }
+
+    private static FileNode shallowCopy(FileNode node) {
+        var copy = new FileNode(node.getPath(), node.getName(), node.isDirectory(), node.getSize());
+        if (node.isBuildArtifact()) copy.setBuildArtifact(true);
+        if (node.isSymlink()) copy.setSymlink(true);
+        if (node.isHardlinkReference()) copy.setHardlinkReference(true);
+        for (var child : node.getChildren()) {
+            copy.addChild(shallowCopy(child));
+        }
+        return copy;
     }
 
     private static void detectLinks(Path path, FileNode node, Map<Object, Path> inodeMap) {

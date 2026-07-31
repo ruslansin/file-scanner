@@ -70,9 +70,9 @@ public class FileScanner {
         processed.incrementAndGet();
         long proc = processed.get();
         long disc = discovered.get();
-        if (proc % 50 == 0 || proc >= disc) {
+        if (proc % 500 == 0 || proc >= disc) {
             progressCallback.accept((double) proc / Math.max(disc, 1));
-            if (detailCallback != null && proc % 200 == 0) {
+            if (detailCallback != null && proc % 1000 == 0) {
                 detailCallback.accept(new ScanProgress(
                         (double) proc / Math.max(disc, 1), disc, proc, runningSize.get()));
             }

@@ -391,12 +391,13 @@ public class MainWindow {
         ringsChart.clear();
         bottomTabs.setRoot(null);
 
-        scanner.scan(rootPath, p -> Platform.runLater(() -> progressBar.setProgress(p)),
-                        sp -> Platform.runLater(() -> {
-                            statusLabel.setText(String.format("Scanning: %s (%s found, %s)",
-                                    rootPath, sp.filesDiscovered(), formatSize(sp.totalSizeSoFar())));
-                        }))
+        var lastUpdate = new long[]{0};
+        scanner.scan(rootPath, p -> maybeUpdate(() -> progressBar.setProgress(p), lastUpdate),
+                        sp -> maybeUpdate(() -> statusLabel.setText(String.format(
+                                "Scanning: %s (%s found, %s)",
+                                rootPath, sp.filesDiscovered(), formatSize(sp.totalSizeSoFar()))), lastUpdate))
                 .thenAccept(root -> Platform.runLater(() -> {
+                    progressBar.setProgress(1.0);
                     if (root == null) {
                         statusLabel.setText("Scan cancelled");
                     } else {
@@ -750,6 +751,14 @@ public class MainWindow {
             applyTheme();
             sortCombo.setValue("Sort by " + capitalize(s.defaultSort));
             if (currentRoot != null) rescanCurrentRoot();
+        }
+    }
+
+    private static void maybeUpdate(Runnable action, long[] lastUpdate) {
+        long now = System.currentTimeMillis();
+        if (now - lastUpdate[0] >= 200) {
+            lastUpdate[0] = now;
+            Platform.runLater(action);
         }
     }
 

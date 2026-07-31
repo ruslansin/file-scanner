@@ -112,7 +112,7 @@ public class FileScanner {
         long proc = processed.get();
         long disc = discovered.get();
         if (proc % 500 == 0 || proc >= disc) {
-            progressCallback.accept((double) proc / Math.max(disc, 1));
+            progressCallback.accept(Math.min(1.0, (double) proc / Math.max(disc, 1)));
         }
 
         if (!Files.isDirectory(path)) {

@@ -13,7 +13,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -41,25 +40,23 @@ public class FileScanner {
                                               Consumer<ScanProgress> detailCallback) {
         cancelled = false;
         runningSize.set(0);
-        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            return CompletableFuture.supplyAsync(() -> {
-                try {
-                    if (!Files.exists(root)) return null;
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!Files.exists(root)) return null;
 
-                    var discovered = new AtomicLong(1);
-                    var processed = new AtomicLong(0);
-                    var inodeMap = new HashMap<Object, Path>();
+                var discovered = new AtomicLong(1);
+                var processed = new AtomicLong(0);
+                var inodeMap = new HashMap<Object, Path>();
 
-                    var node = buildTree(root, discovered, processed, progressCallback, detailCallback, inodeMap);
-                    if (node != null) {
-                        node.sortChildren();
-                    }
-                    return node;
-                } catch (IOException e) {
-                    throw new RuntimeException("Scan failed", e);
+                var node = buildTree(root, discovered, processed, progressCallback, detailCallback, inodeMap);
+                if (node != null) {
+                    node.sortChildren();
                 }
-            }, executor);
-        }
+                return node;
+            } catch (IOException e) {
+                throw new RuntimeException("Scan failed", e);
+            }
+        }, r -> Thread.ofVirtual().start(r));
     }
 
     private FileNode buildTree(Path path, AtomicLong discovered, AtomicLong processed,

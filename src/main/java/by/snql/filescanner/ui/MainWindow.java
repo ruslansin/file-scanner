@@ -605,17 +605,26 @@ public class MainWindow {
     }
 
     private void populateTree(FileNode root) {
-        var treeRoot = createTreeItem(root);
+        var treeRoot = createLazyTreeItem(root);
         treeRoot.setExpanded(true);
         treeView.setRoot(treeRoot);
     }
 
-    private TreeItem<FileNode> createTreeItem(FileNode node) {
+    private TreeItem<FileNode> createLazyTreeItem(FileNode node) {
         var item = new TreeItem<>(node);
-        for (var child : node.getChildren()) {
-            if (child.isDirectory()) {
-                item.getChildren().add(createTreeItem(child));
-            }
+        if (node.isDirectory() && !node.getChildren().isEmpty()) {
+            item.getChildren().add(new TreeItem<>(new FileNode(null, "Loading...", false, 0)));
+            item.expandedProperty().addListener((obs, old, val) -> {
+                if (val && item.getChildren().size() == 1 &&
+                        "Loading...".equals(item.getChildren().get(0).getValue().getName())) {
+                    item.getChildren().clear();
+                    for (var child : node.getChildren()) {
+                        if (child.isDirectory()) {
+                            item.getChildren().add(createLazyTreeItem(child));
+                        }
+                    }
+                }
+            });
         }
         return item;
     }

@@ -159,6 +159,7 @@ public final class FileAnalysis {
     }
 
     private static long lastModified(FileNode file) {
+        if (file.getLastModified() > 0) return file.getLastModified();
         try {
             return Files.readAttributes(file.getPath(), BasicFileAttributes.class).lastModifiedTime().toMillis();
         } catch (Exception e) {

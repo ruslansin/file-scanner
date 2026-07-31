@@ -14,6 +14,7 @@ public class FileNode implements Comparable<FileNode> {
     private boolean buildArtifact;
     private boolean symlink;
     private boolean hardlinkReference;
+    private long lastModified;
 
     public FileNode(Path path, String name, boolean directory, long size) {
         this.path = path;
@@ -44,6 +45,9 @@ public class FileNode implements Comparable<FileNode> {
 
     public boolean isHardlinkReference() { return hardlinkReference; }
     public void setHardlinkReference(boolean h) { this.hardlinkReference = h; }
+
+    public long getLastModified() { return lastModified; }
+    public void setLastModified(long lm) { this.lastModified = lm; }
 
     public void sortChildren() {
         children.sort(FileNode::compareTo);

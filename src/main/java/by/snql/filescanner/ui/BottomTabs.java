@@ -165,67 +165,75 @@ public class BottomTabs {
 
     private void refreshDuplicates() {
         if (root == null) return;
-        duplicatesBox.getChildren().clear();
-
         if (!Settings.get().duplicateSHA256) {
+            duplicatesBox.getChildren().clear();
             duplicatesBox.getChildren().add(new Label("Duplicate detection is disabled."));
             duplicatesBox.getChildren().add(new Label(
                     "Enable SHA-256 in Settings (⚙) for exact content-based duplicate detection."));
             return;
         }
 
-        var groups = FileAnalysis.findDuplicates(root);
+        FileNode r = root;
+        duplicatesBox.getChildren().clear();
+        duplicatesBox.getChildren().add(new Label("Scanning for duplicates..."));
 
-        if (groups.isEmpty()) {
-            duplicatesBox.getChildren().add(new Label("No duplicates found."));
-            return;
-        }
+        Thread.ofVirtual().start(() -> {
+            var groups = FileAnalysis.findDuplicates(r);
+            Platform.runLater(() -> {
+                duplicatesBox.getChildren().clear();
 
-        duplicatesBox.getChildren().add(new Label(
-                "SHA-256 content hashing. Excludes: .git/, node_modules/, target/, ..."));
+                if (groups.isEmpty()) {
+                    duplicatesBox.getChildren().add(new Label("No duplicates found."));
+                    return;
+                }
 
-        long wasted = FileAnalysis.totalDuplicateWaste(groups);
-        duplicatesBox.getChildren().add(new Label(
-                "Showing top " + groups.size() + " duplicate groups. Wasted space: " +
-                MainWindow.formatSize(wasted)));
-        duplicatesBox.getChildren().add(new Label(
-                "Excludes: .git/, node_modules/, target/, __pycache__/, build/, dist/, vendor/, .venv/"));
+                duplicatesBox.getChildren().add(new Label(
+                        "SHA-256 content hashing. Excludes: .git/, node_modules/, target/, ..."));
 
-        for (var group : groups) {
-            var groupBox = new VBox(3);
-            groupBox.setStyle("-fx-border-color: #ddd; -fx-border-radius: 4; -fx-padding: 5;");
+                long wasted = FileAnalysis.totalDuplicateWaste(groups);
+                duplicatesBox.getChildren().add(new Label(
+                        "Showing top " + groups.size() + " duplicate groups. Wasted space: " +
+                        MainWindow.formatSize(wasted)));
+                duplicatesBox.getChildren().add(new Label(
+                        "Excludes: .git/, node_modules/, target/, __pycache__/, build/, dist/, vendor/, .venv/"));
 
-            String prefix = FileAnalysis.commonPathPrefix(group.files);
-            var header = new Label(group.files.size() + " identical files × " +
-                    MainWindow.formatSize(group.fileSize) + " each  (waste: " +
-                    MainWindow.formatSize(group.wastedSize()) + ")");
-            header.setStyle("-fx-font-weight: bold;");
-            groupBox.getChildren().add(header);
+                for (var group : groups) {
+                    var groupBox = new VBox(3);
+                    groupBox.setStyle("-fx-border-color: #ddd; -fx-border-radius: 4; -fx-padding: 5;");
 
-            if (!prefix.isEmpty()) {
-                var loc = new Label("  in " + prefix);
-                loc.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-                groupBox.getChildren().add(loc);
-            }
+                    String prefix = FileAnalysis.commonPathPrefix(group.files);
+                    var header = new Label(group.files.size() + " identical files × " +
+                            MainWindow.formatSize(group.fileSize) + " each  (waste: " +
+                            MainWindow.formatSize(group.wastedSize()) + ")");
+                    header.setStyle("-fx-font-weight: bold;");
+                    groupBox.getChildren().add(header);
 
-            int shown = 0;
-            for (var file : group.files) {
-                if (shown++ >= 3) break;
-                var cb = new CheckBox(file.getPath().toString() + "  (" +
-                        MainWindow.formatSize(file.getSize()) + ")");
-                groupBox.getChildren().add(cb);
-            }
-            if (group.files.size() > 3) {
-                groupBox.getChildren().add(new Label("  … and " + (group.files.size() - 3) +
-                        " more files"));
-            }
+                    if (!prefix.isEmpty()) {
+                        var loc = new Label("  in " + prefix);
+                        loc.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
+                        groupBox.getChildren().add(loc);
+                    }
 
-            duplicatesBox.getChildren().add(groupBox);
-        }
+                    int shown = 0;
+                    for (var file : group.files) {
+                        if (shown++ >= 3) break;
+                        var cb = new CheckBox(file.getPath().toString() + "  (" +
+                                MainWindow.formatSize(file.getSize()) + ")");
+                        groupBox.getChildren().add(cb);
+                    }
+                    if (group.files.size() > 3) {
+                        groupBox.getChildren().add(new Label("  … and " + (group.files.size() - 3) +
+                                " more files"));
+                    }
 
-        var deleteBtn = new Button("Delete Selected");
-        deleteBtn.setOnAction(e -> deleteSelectedDuplicates());
-        duplicatesBox.getChildren().add(deleteBtn);
+                    duplicatesBox.getChildren().add(groupBox);
+                }
+
+                var deleteBtn = new Button("Delete Selected");
+                deleteBtn.setOnAction(e -> deleteSelectedDuplicates());
+                duplicatesBox.getChildren().add(deleteBtn);
+            });
+        });
     }
 
     private void deleteSelectedDuplicates() {
@@ -247,6 +255,7 @@ public class BottomTabs {
 
     private void refreshOldFiles() {
         if (root == null) return;
+        FileNode r = root;
         String selected = ageFilter.getValue();
         long millis = switch (selected) {
             case "30 days" -> 30L;
@@ -256,8 +265,10 @@ public class BottomTabs {
             default -> 90L;
         } * 24 * 3600 * 1000;
 
-        var files = FileAnalysis.oldFiles(root, millis);
-        oldFilesTable.setItems(FXCollections.observableArrayList(files));
+        Thread.ofVirtual().start(() -> {
+            var files = FileAnalysis.oldFiles(r, millis);
+            Platform.runLater(() -> oldFilesTable.setItems(FXCollections.observableArrayList(files)));
+        });
     }
 
     private TableView<FileNode> createLargestTable() {

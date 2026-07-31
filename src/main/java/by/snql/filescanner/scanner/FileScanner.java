@@ -69,6 +69,7 @@ public class FileScanner {
         var fileName = path.getFileName() != null
                 ? path.getFileName().toString() : path.toString();
         var node = new FileNode(path, fileName, true, 0);
+        node.setLastModified(safeLastModified(path));
         if (Settings.get().projectScanEnabled && ProjectType.isArtifactName(fileName)) {
             var parentType = ProjectType.detect(path.getParent());
             if (parentType.isPresent() && parentType.get().artifacts().contains(fileName)) {
@@ -120,6 +121,7 @@ public class FileScanner {
                     ? path.getFileName().toString() : path.toString();
             long size = safeFileSize(path);
             var node = new FileNode(path, fileName, false, size);
+            node.setLastModified(safeLastModified(path));
             detectLinks(path, node, inodeMap);
             runningSize.addAndGet(size);
             return node;
@@ -145,6 +147,7 @@ public class FileScanner {
         if (node.isBuildArtifact()) copy.setBuildArtifact(true);
         if (node.isSymlink()) copy.setSymlink(true);
         if (node.isHardlinkReference()) copy.setHardlinkReference(true);
+        copy.setLastModified(node.getLastModified());
         for (var child : node.getChildren()) {
             copy.addChild(shallowCopy(child));
         }
@@ -178,6 +181,14 @@ public class FileScanner {
         } catch (IOException e) {
             return path.getFileName() != null
                     && path.getFileName().toString().startsWith(".");
+        }
+    }
+
+    private static long safeLastModified(Path path) {
+        try {
+            return Files.getLastModifiedTime(path).toMillis();
+        } catch (IOException e) {
+            return 0;
         }
     }
 

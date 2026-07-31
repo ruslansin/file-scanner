@@ -57,6 +57,7 @@ public class MainWindow {
     private Path scannedRootPath;
     private ChartView currentView = ChartView.TREEMAP;
     private final java.util.List<String> history = new ArrayList<>();
+    private boolean updatingHistory;
 
     private static final String[] SIZE_UNITS = {"B", "KB", "MB", "GB", "TB"};
 
@@ -116,6 +117,7 @@ public class MainWindow {
         historyCombo.setPromptText("History");
         historyCombo.setPrefWidth(150);
         historyCombo.setOnAction(e -> {
+            if (updatingHistory) return;
             var selected = historyCombo.getValue();
             if (selected != null && !selected.isEmpty()) {
                 scan(Path.of(selected));
@@ -426,12 +428,15 @@ public class MainWindow {
     }
 
     private void addToHistory(Path path) {
+        if (updatingHistory) return;
+        updatingHistory = true;
         var s = path.toString();
         history.remove(s);
         history.add(0, s);
         if (history.size() > 20) history.remove(history.size() - 1);
         historyCombo.setItems(FXCollections.observableArrayList(history));
         historyCombo.setValue(s);
+        updatingHistory = false;
     }
 
     private void rescanCurrentRoot() {

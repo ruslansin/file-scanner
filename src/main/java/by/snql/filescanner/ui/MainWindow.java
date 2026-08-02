@@ -7,6 +7,7 @@ import by.snql.filescanner.core.export.ExportUtils;
 import by.snql.filescanner.core.export.PdfReport;
 import by.snql.filescanner.core.util.SizeFormat;
 import by.snql.filescanner.model.FileNode;
+import by.snql.filescanner.model.SyntheticFileNode;
 import by.snql.filescanner.scanner.FileScanner;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -308,8 +309,10 @@ public class MainWindow {
         breadcrumbBar.getChildren().clear();
         for (int i = 0; i < viewStack.size(); i++) {
             final int idx = i;
-            var name = viewStack.get(i).getName();
-            var link = new Hyperlink(name.isEmpty() ? "/" : name);
+            var node = viewStack.get(i);
+            var name = node.getName();
+            var display = node instanceof SyntheticFileNode ? "[" + name + "]" : name;
+            var link = new Hyperlink(display.isEmpty() ? "/" : display);
             link.setOnAction(e -> navigateTo(idx));
             breadcrumbBar.getChildren().add(link);
             if (i < viewStack.size() - 1) {
@@ -319,6 +322,11 @@ public class MainWindow {
     }
 
     private void onChartNodeClicked(FileNode node) {
+        if (!viewStack.isEmpty() && viewStack.get(viewStack.size() - 1) instanceof SyntheticFileNode) {
+            viewStack.clear();
+            var chain = walkHierarchy(currentRoot, node.getPath());
+            for (var dir : chain) pushView(dir);
+        }
         pushView(node);
         highlightInTree(node);
     }
@@ -330,20 +338,38 @@ public class MainWindow {
                 .toList();
         if (selected.size() > 1 && selected.contains(clicked)) {
             var synthetic = createGroupNode(selected);
-            pushView(synthetic);
+            resetView(synthetic);
         } else {
-            resetView(clicked);
+            viewStack.clear();
+            var chain = walkHierarchy(currentRoot, clicked.getPath());
+            for (var dir : chain) pushView(dir);
+            pushView(clicked);
         }
     }
 
-    private static FileNode createGroupNode(List<FileNode> nodes) {
+    private static List<FileNode> walkHierarchy(FileNode root, Path target) {
+        var chain = new ArrayList<FileNode>();
+        walkHierarchy(root, target, chain);
+        return chain;
+    }
+
+    private static boolean walkHierarchy(FileNode node, Path target, List<FileNode> chain) {
+        if (node.getPath().equals(target)) return true;
+        for (var child : node.getChildren()) {
+            if (child.isDirectory() && target.startsWith(child.getPath())) {
+                chain.add(child);
+                if (walkHierarchy(child, target, chain)) return true;
+                chain.remove(chain.size() - 1);
+            }
+        }
+        return false;
+    }
+
+    private static SyntheticFileNode createGroupNode(List<FileNode> nodes) {
         var label = nodes.stream().map(FileNode::getName)
                 .collect(Collectors.joining(", "));
         if (label.length() > 60) label = label.substring(0, 57) + "...";
-        long totalSize = nodes.stream().mapToLong(FileNode::getSize).sum();
-        var group = new FileNode(Path.of(""), label, true, totalSize);
-        nodes.forEach(group::attachChild);
-        return group;
+        return new SyntheticFileNode(label, nodes);
     }
 
     private void onKeyPressed(KeyEvent e) {

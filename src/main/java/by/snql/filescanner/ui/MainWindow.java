@@ -28,8 +28,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -48,7 +50,6 @@ public class MainWindow {
     private final HBox breadcrumbBar;
     private final Button upButton;
     private final TreeView<FileNode> treeView;
-    private final ProgressBar progressBar;
     private final Label statusLabel;
     private final Label sizeLabel;
     private final Label diskLabel;
@@ -168,8 +169,6 @@ public class MainWindow {
         settingsButton.setOnAction(e -> showSettingsDialog());
 
         treeView = buildTreeView();
-        progressBar = new ProgressBar(0);
-        progressBar.setVisible(false);
         statusLabel = new Label("Select a folder to scan");
         sizeLabel = new Label("");
         diskLabel = new Label("");
@@ -189,10 +188,9 @@ public class MainWindow {
                 new Separator(), hiddenFilesCheck, darkModeCheck,
                 new Separator(), sortCombo,
                 new Separator(), treemapBtn, ringsBtn,
-                new Separator(), searchField, historyCombo, settingsButton, progressBar);
+                new Separator(), searchField, historyCombo, settingsButton);
         toolbar.setPadding(new Insets(6, 10, 6, 10));
         toolbar.setAlignment(Pos.CENTER_LEFT);
-        HBox.setHgrow(progressBar, Priority.ALWAYS);
 
         var statusBar = new HBox(10, statusLabel, countLabel, sizeLabel, diskLabel);
         statusBar.setPadding(new Insets(5, 10, 5, 10));
@@ -416,12 +414,44 @@ public class MainWindow {
         alert.setContentText("Total size: " + SizeFormat.format(totalSize) +
                 (Settings.get().moveToTrash ? "\n(moved to trash)" : "\n(PERMANENTLY deleted)"));
 
-        if (alert.showAndWait().orElse(null) == ButtonType.OK) {
-            var paths = nodes.stream().map(FileNode::getPath).filter(p -> p != null).toList();
-            var result = DeletionService.delete(paths, Settings.get().moveToTrash);
-            reportDeletionResult(result);
-            rescanCurrentRoot();
+        if (alert.showAndWait().orElse(null) != ButtonType.OK) return;
+
+        var paths = nodes.stream().map(FileNode::getPath).filter(p -> p != null).toList();
+        var result = DeletionService.delete(paths, Settings.get().moveToTrash);
+        reportDeletionResult(result);
+
+        if (result.deleted().isEmpty() || currentRoot == null) return;
+
+        var removedPaths = new HashSet<>(result.deleted());
+        removeDeletedPaths(currentRoot, removedPaths);
+
+        applySort(currentRoot);
+        populateTree(currentRoot);
+        resetView(currentRoot);
+        sizeLabel.setText(SizeFormat.format(currentRoot.getSize()));
+        updateCounts(currentRoot);
+        bottomTabs.setRoot(currentRoot);
+        Thread.ofVirtual().start(() -> CacheManager.saveLastScan(currentRoot));
+    }
+
+    private static boolean removeDeletedPaths(FileNode parent, Set<Path> removedPaths) {
+        var toRemove = new ArrayList<FileNode>();
+        for (var child : parent.getChildren()) {
+            if (removedPaths.contains(child.getPath())) {
+                toRemove.add(child);
+            }
         }
+        for (var child : toRemove) {
+            parent.removeChild(child);
+        }
+        for (var child : parent.getChildren()) {
+            if (child.isDirectory() && removeDeletedPaths(child, removedPaths)) {
+                if (child.getChildren().isEmpty()) {
+                    child.setSize(0);
+                }
+            }
+        }
+        return !toRemove.isEmpty();
     }
 
     private void reportDeletionResult(DeletionService.DeletionResult result) {
@@ -450,8 +480,6 @@ public class MainWindow {
     public void scan(Path rootPath) {
         addToHistory(rootPath);
         scannedRootPath = rootPath;
-        progressBar.setVisible(true);
-        progressBar.setProgress(0);
         cancelButton.setVisible(true);
         scanButton.setDisable(true);
         statusLabel.setText("Scanning: " + rootPath);
@@ -463,8 +491,7 @@ public class MainWindow {
 
         startMemoryMonitor();
 
-        var lastUpdate = new long[]{0};
-        scanner.scan(rootPath, p -> maybeUpdate(() -> progressBar.setProgress(p), lastUpdate),
+        scanner.scan(rootPath, null,
                         partial -> Platform.runLater(() -> {
                             partial.sortChildren();
                             updateTreeLive(partial);
@@ -474,7 +501,6 @@ public class MainWindow {
                         }))
                 .thenAccept(root -> Platform.runLater(() -> {
                     stopMemoryMonitor();
-                    progressBar.setProgress(1.0);
                     if (root == null) {
                         statusLabel.setText("Scan cancelled");
                     } else {
@@ -491,7 +517,6 @@ public class MainWindow {
                         Settings.get().save();
                         Thread.ofVirtual().start(() -> CacheManager.saveLastScan(root));
                     }
-                    progressBar.setVisible(false);
                     cancelButton.setVisible(false);
                     scanButton.setDisable(false);
                     searchField.clear();
@@ -500,7 +525,6 @@ public class MainWindow {
                     Platform.runLater(() -> {
                         stopMemoryMonitor();
                         showError("Scan Error", "Scan failed", ex.getMessage());
-                        progressBar.setVisible(false);
                         cancelButton.setVisible(false);
                         scanButton.setDisable(false);
                     });
@@ -625,16 +649,27 @@ public class MainWindow {
 
         if (node.isBuildArtifact()) {
             var deleteBuildItem = new MenuItem("Delete Build Artifact");
-            deleteBuildItem.setOnAction(e -> deleteNodes(List.of(node)));
+            deleteBuildItem.setOnAction(e -> deleteNodes(collectSelectedNodes(node)));
             menu.getItems().add(deleteBuildItem);
             menu.getItems().add(new SeparatorMenuItem());
         }
 
         var deleteItem = new MenuItem("Delete");
-        deleteItem.setOnAction(e -> deleteNodes(List.of(node)));
+        deleteItem.setOnAction(e -> deleteNodes(collectSelectedNodes(node)));
         menu.getItems().add(deleteItem);
 
         return menu;
+    }
+
+    private List<FileNode> collectSelectedNodes(FileNode rightClicked) {
+        var selected = treeView.getSelectionModel().getSelectedItems().stream()
+                .filter(item -> item.getValue() != null)
+                .map(TreeItem::getValue)
+                .toList();
+        if (selected.size() > 1 && selected.contains(rightClicked)) {
+            return selected;
+        }
+        return List.of(rightClicked);
     }
 
     private void exportReport(String format) {
@@ -921,14 +956,6 @@ public class MainWindow {
             } else {
                 renderCurrentView();
             }
-        }
-    }
-
-    private static void maybeUpdate(Runnable action, long[] lastUpdate) {
-        long now = System.currentTimeMillis();
-        if (now - lastUpdate[0] >= 200) {
-            lastUpdate[0] = now;
-            Platform.runLater(action);
         }
     }
 

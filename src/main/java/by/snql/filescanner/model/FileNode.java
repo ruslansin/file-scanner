@@ -44,6 +44,16 @@ public class FileNode implements Comparable<FileNode> {
         children.add(child);
     }
 
+    /**
+     * Removes a child and subtracts its size from this node's size and all ancestors.
+     * Returns true if the child was found and removed.
+     */
+    public boolean removeChild(FileNode child) {
+        if (!children.remove(child)) return false;
+        size -= child.size;
+        return true;
+    }
+
     public Path getPath() { return path; }
     public String getName() { return name; }
     public boolean isDirectory() { return directory; }

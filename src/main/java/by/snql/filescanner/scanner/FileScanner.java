@@ -138,7 +138,7 @@ public class FileScanner {
         processed.incrementAndGet();
         long proc = processed.get();
         long disc = discovered.get();
-        if (proc % 500 == 0 || proc >= disc) {
+        if ((proc % 500 == 0 || proc >= disc) && progressCallback != null) {
             progressCallback.accept(Math.min(1.0, (double) proc / Math.max(disc, 1)));
         }
 

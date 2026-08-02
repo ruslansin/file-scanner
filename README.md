@@ -60,8 +60,8 @@ src/main/java/by/snql/filescanner/
     ├── RingsChart.java       # Canvas sunburst rings, file-type coloring
     ├── TreemapLayout.java    # Layout algorithm (isolated from JavaFX, testable)
     ├── FileTypeCategory.java # Maps core.analysis.FileCategory to JavaFX colors
-    └── BottomTabs.java       # TabPane: Largest, Types, Duplicates, Empty Dirs, Old Files, Cleanup,
-                               #   Project Cleanup, Compress, Groups, Snapshots — lazily refreshed per tab
+    └── BottomTabs.java       # TabPane: Largest, Types, Duplicates, Empty Dirs, Old Files, Developer
+                               #   Cleanup, Compress, Groups, Snapshots — lazily refreshed per tab
 
 src/main/resources/
 └── cleanup-targets.json      # Windows/Linux/macOS cache targets + developer tools + build artifacts
@@ -82,7 +82,7 @@ src/main/resources/
 - **Open File** — Right-click → launch file in default app
 - **Context menu** — Export (CSV/JSON/HTML/PDF), Delete, Open
 
-### Analysis Tabs (10 total)
+### Analysis Tabs (9 total)
 | Tab | Description |
 |-----|-------------|
 | Largest Files | Top-100 files by size, sortable table |
@@ -90,8 +90,7 @@ src/main/resources/
 | Duplicates | SHA-256 duplicate detection, select and delete |
 | Empty Dirs | All empty directories in the scanned tree |
 | Old Files | Files not modified for 30/90/180/365 days |
-| Cleanup | System caches + developer tool caches, parallel scan, [Open]/[Delete]/[Run] |
-| Project Cleanup | Build artifact detection: target/, node_modules/, build/, __pycache__, .next/ etc. |
+| Developer Cleanup | One tab, three sections: **Build Artifacts** (target/, node_modules/, build/, __pycache__, .next/ etc. — scans configured roots *and* the currently scanned folder), **Docker** (`docker system df` breakdown with per-category "Clean" buttons: images/containers/volumes/build cache), **Package & System Caches** (Maven/Gradle/npm/pip/... + OS junk, parallel scan, [Open]/[Delete]/[Run]) |
 | Compress | Estimated compression savings per file category (heuristic ratios) |
 | Groups | Alternative grouping: by file type, age bucket, or file owner |
 | Snapshots | Save scan snapshot, compare with previous (added/removed/grown/shrunk) |
@@ -113,16 +112,31 @@ overwrite the current one.
 - **Sort** — By size, name, or date
 - **Ctrl+F** — Go to search field
 
-### Cleanup
-- **System caches** — Windows Update, Temp, Prefetch alternatives, APT, Snap, Trash, developer caches, etc.
-  High-risk / destructive locations (installer state, prefetch, recycle bin internals, whole log/tmp trees)
-  have been removed from the defaults; the remaining risky-but-useful ones are marked "high risk" and
-  require an extra confirmation, and support `contentsOnly` (clear a folder's contents but keep the
-  folder itself), `daysOld`, and `extension` filters so cleanup only touches what it says it touches.
-- **Developer caches** — Maven, Gradle, npm, pip, Cargo, Go, NuGet, Yarn, Composer, RubyGems, Docker, Conda, etc.
+### Developer Cleanup
+One tab, one place, three sections — from Java build output to unused Docker containers:
+- **Build Artifacts** — 13 project types detected (Maven, Gradle, Node.js, Python, Rust, Go, .NET, PHP,
+  CMake, Make, etc.), grouped by type with per-artifact and "Delete All" actions. Scans the configured
+  roots (Settings) *plus* whichever folder is currently open in the main scan, so it works immediately
+  without separate configuration. Never recurses into a dependency/output folder it already recorded as
+  an artifact (`node_modules`, `vendor`, `target`, ...) — avoids noisy duplicate "projects" detected
+  inside someone else's published package, and the wasted time walking huge dependency trees.
+- **Docker** — live `docker system df` breakdown (Images/Containers/Local Volumes/Build Cache, with
+  total/active/size/reclaimable) instead of one blind "prune everything" button; a "Clean" action per
+  category runs the matching `docker <type> prune`, plus a "Clean Everything Unused" for
+  `docker system prune -a -f --volumes`. Gracefully reports "Docker not available" if the CLI/daemon
+  isn't reachable, instead of failing silently or crashing the tab.
+- **Package & System Caches** — Windows Update, Temp, Prefetch alternatives, APT, Snap, Trash, plus
+  developer tool caches (Maven, Gradle, npm, pip, Cargo, Go, NuGet, Yarn, Composer, RubyGems, Conda,
+  etc.). High-risk / destructive locations (installer state, prefetch, recycle bin internals, whole
+  log/tmp trees, and — as of this rework — raw Docker storage-driver paths like `overlay2`/`volumes`,
+  which must go through `docker prune`, never a raw `rm -rf`, without corrupting the daemon's state)
+  have been removed from the defaults or marked `actionOnly` (no direct-delete button, only the paired
+  safe command); the remaining risky-but-useful ones are marked "high risk" and require an extra
+  confirmation. Targets support `contentsOnly`, `daysOld`, and `extension` filters so cleanup only
+  touches what it says it touches.
 - **Custom commands** — `customCommand` field in JSON targets; always shown to you and confirmed before running (`sh -c` / `cmd /c`)
 - **Elevated access** — `pkexec` (Linux), `osascript` (macOS), UAC (Windows) for locked paths; helper scripts are written to `~/.filescanner/run/` with random per-run names and cleaned up afterwards
-- **Parallel scanning** — All targets scanned concurrently via Virtual Threads
+- **Parallel scanning** — All three sections, and every cache target within them, scanned concurrently via Virtual Threads
 
 ### Link Detection
 - **Symlinks** — Never followed (even when pointing at a directory), size=0, shown with ↗ marker
@@ -130,10 +144,11 @@ overwrite the current one.
 - **Directory cycles** — junctions/bind-mount loops are detected and stopped, not walked forever
 
 ### Build Artifacts
-- **13 project types** detected: Maven, Gradle, Node.js, Python, Rust, Go, .NET, PHP, CMake, Make, etc.
-- Artifacts highlighted with 🧹 icon and orange bold text in tree
-- Right-click → "Delete Build Artifact"
-- Configurable scan roots and depth in Settings
+- Detected the same way in two places: live, inline in the scanned tree (🧹 icon + orange bold text,
+  right-click → "Delete Build Artifact") and in bulk in the **Developer Cleanup** tab's Build Artifacts
+  section (grouped by project type, "Delete All").
+- Configurable scan roots and depth in Settings (Developer Cleanup also auto-includes whatever folder
+  is currently scanned, on top of the configured roots).
 
 ## Settings
 
@@ -148,6 +163,7 @@ overwrite the current one.
   "scanRoots": ["~/dev", "~/projects"],
   "projectScanEnabled": true,
   "projectScanDepth": 5,
+  "chartRenderDepth": 5,
   "moveToTrash": true
 }
 ```

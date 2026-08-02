@@ -11,6 +11,7 @@ import by.snql.filescanner.scanner.FileScanner;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
+import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
@@ -201,13 +202,23 @@ public class MainWindow {
         mainSplit.getItems().add(treeView);
         mainSplit.getItems().add(chartPane);
         mainSplit.setDividerPositions(0.3);
+        // Give the tree+charts a sane minimum so dragging the outer divider all the way
+        // down doesn't collapse them to nothing.
+        mainSplit.setMinHeight(150);
 
         var bottomPane = bottomTabs.getPane();
-        bottomPane.setMaxHeight(200);
-        VBox.setVgrow(mainSplit, Priority.ALWAYS);
+        // No more fixed 200px cap — the outer vertical SplitPane's divider below lets the
+        // user drag this panel taller or shorter themselves, which a fixed max height
+        // didn't allow no matter how much the window was maximized.
+        bottomPane.setMinHeight(80);
 
-        var root = new VBox(toolbar, mainSplit, bottomPane, statusBar);
-        VBox.setVgrow(root, Priority.ALWAYS);
+        var outerSplit = new SplitPane();
+        outerSplit.setOrientation(Orientation.VERTICAL);
+        outerSplit.getItems().addAll(mainSplit, bottomPane);
+        outerSplit.setDividerPositions(0.72);
+        VBox.setVgrow(outerSplit, Priority.ALWAYS);
+
+        var root = new VBox(toolbar, outerSplit, statusBar);
 
         var scene = new Scene(root, 1100, 750);
         scene.getStylesheets().add(getClass().getResource("/styles/main.css").toExternalForm());
@@ -674,6 +685,7 @@ public class MainWindow {
         if (treeView.getRoot() == null) {
             var treeRoot = new TreeItem<>(root);
             treeRoot.setExpanded(true);
+            mergeChildren(treeRoot, root);
             treeView.setRoot(treeRoot);
         } else {
             treeView.getRoot().setValue(root);
@@ -703,15 +715,23 @@ public class MainWindow {
                 if (freshChild.isDirectory()) mergeChildren(ex, freshChild);
                 item.getChildren().add(ex);
             } else {
-                var newItem = new TreeItem<>(freshChild);
-                if (freshChild.isDirectory()) {
-                    for (var grandChild : freshChild.getChildren()) {
-                        newItem.getChildren().add(new TreeItem<>(grandChild));
-                    }
-                }
-                item.getChildren().add(newItem);
+                item.getChildren().add(buildTreeItem(freshChild));
             }
         }
+    }
+
+    /** Recursively builds a full {@link TreeItem} subtree for a brand-new {@link FileNode}
+     *  (i.e. one with no corresponding existing {@link TreeItem} to merge into) — every
+     *  descendant, not just the immediate children, so restoring a tree in one shot
+     *  (e.g. loading the cached scan on startup) doesn't stop after a couple of levels. */
+    private TreeItem<FileNode> buildTreeItem(FileNode node) {
+        var item = new TreeItem<>(node);
+        if (node.isDirectory()) {
+            for (var child : node.getChildren()) {
+                item.getChildren().add(buildTreeItem(child));
+            }
+        }
+        return item;
     }
 
     private void highlightInTree(FileNode target) {
@@ -807,9 +827,20 @@ public class MainWindow {
         depthField.setPrefWidth(60);
         form.add(depthField, 1, 7);
 
+        var chartDepthLabel = new Label("Chart nesting depth:");
+        form.add(chartDepthLabel, 0, 8);
+        var chartDepthField = new TextField(String.valueOf(s.chartRenderDepth));
+        chartDepthField.setPrefWidth(60);
+        form.add(chartDepthField, 1, 8);
+        var chartDepthNote = new Label("How many nested levels Treemap/Rings subdivide before folding deeper content into one block (like GNOME Baobab). Lower = cleaner but less detail at a glance; click to drill down either way.");
+        chartDepthNote.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
+        chartDepthNote.setWrapText(true);
+        chartDepthNote.setMaxWidth(350);
+        form.add(chartDepthNote, 0, 9, 2, 1);
+
         var note = new Label("Duplicate detection uses SHA-256. Disabled by default (slow on large scans).");
         note.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-        form.add(note, 0, 8, 2, 1);
+        form.add(note, 0, 10, 2, 1);
 
         var dialog = new Dialog<ButtonType>();
         dialog.setTitle("Settings");
@@ -827,6 +858,9 @@ public class MainWindow {
                     .stream().map(String::trim).filter(l -> !l.isEmpty()).toList();
             s.projectScanEnabled = projectEnabledCb.isSelected();
             try { s.projectScanDepth = Integer.parseInt(depthField.getText()); } catch (NumberFormatException ignored) {}
+            try { s.chartRenderDepth = Integer.parseInt(chartDepthField.getText()); } catch (NumberFormatException ignored) {}
+            if (s.chartRenderDepth < 1) s.chartRenderDepth = 1;
+            if (s.chartRenderDepth > 10) s.chartRenderDepth = 10;
             s.save();
 
             hiddenFilesCheck.setSelected(s.scanHidden);
@@ -834,7 +868,11 @@ public class MainWindow {
             applyScanSettings();
             applyTheme();
             sortCombo.setValue("Sort by " + capitalize(s.defaultSort));
-            if (currentRoot != null) rescanCurrentRoot();
+            if (currentRoot != null) {
+                rescanCurrentRoot();
+            } else {
+                renderCurrentView();
+            }
         }
     }
 

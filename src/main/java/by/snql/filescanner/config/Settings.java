@@ -29,6 +29,14 @@ public class Settings {
     public List<String> scanRoots = new ArrayList<>();
     public boolean projectScanEnabled = true;
     public int projectScanDepth = 5;
+    /** How many nested levels the Treemap/Rings charts subdivide below the currently
+     *  displayed root before folding deeper content into a single flat block, marked with
+     *  a small "more below" indicator (matches GNOME Baobab, which defaults to showing the
+     *  scanned tree's actual depth up to a ceiling of 5-8 levels, and marks truncated nodes
+     *  rather than silently hiding them). Drill down via click to see further detail
+     *  instead of rendering the whole subtree at once. See {@code ui.TreemapLayout}/
+     *  {@code ui.RingsChart}. */
+    public int chartRenderDepth = 5;
     public String lastScannedPath = "";
     public boolean moveToTrash = true;
     public List<String> recentPaths = new ArrayList<>();
@@ -73,6 +81,8 @@ public class Settings {
         if (s.recentPaths == null) s.recentPaths = new ArrayList<>();
         if (s.defaultSort == null) s.defaultSort = "size";
         if (s.lastScannedPath == null) s.lastScannedPath = "";
+        if (s.chartRenderDepth < 1) s.chartRenderDepth = 1;
+        if (s.chartRenderDepth > 10) s.chartRenderDepth = 10;
         return s;
     }
 }

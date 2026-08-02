@@ -7,15 +7,22 @@ import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -32,19 +39,87 @@ public final class SystemCleanup {
      * directory entry itself (needed for locations like %TEMP% that must keep existing);
      * {@code daysOld}/{@code extension} further restrict which files within a target count
      * towards size / deletion. {@code risk} is surfaced in the UI ("high" prompts an extra
-     * confirmation) since not all cleanup targets carry the same blast radius.
+     * confirmation) since not all cleanup targets carry the same blast radius. {@code actionOnly}
+     * hides the generic "delete the raw path" button entirely — for locations like the Windows
+     * component store (WinSxS) or the hibernation file, where deleting files directly is either
+     * destructive (breaks OS servicing) or simply doesn't work, and reclaiming the space is only
+     * ever safe/possible via the paired {@code customCommand} (DISM, {@code powercfg}, etc.).
      */
     public record Target(String name, String path, String description, String customCommand,
                           boolean contentsOnly, Integer daysOld, String extension, boolean filesOnly,
-                          String risk) {
+                          String risk, boolean actionOnly) {
         public Target(String name, String path, String description) {
-            this(name, path, description, null, false, null, null, false, "low");
+            this(name, path, description, null, false, null, null, false, "low", false);
         }
 
         public boolean isHighRisk() { return "high".equalsIgnoreCase(risk); }
     }
 
     public record BuildArtifact(ProjectType projectType, String artifactName, Path path, Path projectDir) {}
+
+    /**
+     * One row of {@code docker system df} output. {@code size}/{@code reclaimable} are kept
+     * as Docker's own human-readable strings (e.g. {@code "1.8GB (72%)"}) for per-row
+     * display — Docker already computed them correctly from its own storage driver, so the
+     * string is shown verbatim rather than reformatted through our own byte-based
+     * {@code SizeFormat} and risking a rounding mismatch. See {@link #parseDockerSize} for
+     * the one place these strings ARE parsed, purely to compute a best-effort aggregate.
+     */
+    public record DockerCategory(String type, String total, String active, String size, String reclaimable) {}
+
+    /** Result of {@code docker system df} — {@code available=false} means Docker isn't
+     *  installed, isn't running, or didn't respond in time; {@code error} explains why. */
+    public record DockerUsage(boolean available, String error, List<DockerCategory> categories) {}
+
+    /** Result of running a {@code docker} subcommand (e.g. a prune). */
+    public record CommandResult(boolean success, String output) {}
+
+    private static final java.util.regex.Pattern DOCKER_SIZE_PATTERN =
+            java.util.regex.Pattern.compile("^([0-9]*\\.?[0-9]+)\\s*([a-zA-Z]*)$");
+
+    /**
+     * Best-effort parse of one of Docker's human-readable size strings (e.g.
+     * {@code "1.8GB (72%)"}, {@code "212 B"}, {@code "16.43 MB"}) into bytes — used only to
+     * compute the cross-section "how much space could I free" aggregate shown at the top of
+     * the Developer Cleanup tab; every per-row number in the UI still shows Docker's string
+     * verbatim. Docker's {@code go-units} formats sizes with decimal (1000-based, not 1024)
+     * multipliers, matched here. Unknown/unparseable units contribute 0 rather than guessing,
+     * so an unexpected format in some Docker version can't silently inflate the total.
+     */
+    public static long parseDockerSize(String raw) {
+        if (raw == null) return 0;
+        String s = raw.replaceAll("\\(.*?\\)", "").trim();
+        var matcher = DOCKER_SIZE_PATTERN.matcher(s);
+        if (!matcher.matches()) return 0;
+
+        double value;
+        try {
+            value = Double.parseDouble(matcher.group(1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+
+        long multiplier = switch (matcher.group(2).toUpperCase(Locale.ROOT)) {
+            case "", "B" -> 1L;
+            case "KB" -> 1_000L;
+            case "MB" -> 1_000_000L;
+            case "GB" -> 1_000_000_000L;
+            case "TB" -> 1_000_000_000_000L;
+            case "PB" -> 1_000_000_000_000_000L;
+            default -> 0L;
+        };
+        return (long) (value * multiplier);
+    }
+
+    /** Sums {@link #parseDockerSize} over every category's reclaimable figure; 0 if Docker
+     *  isn't available (nothing to add, not "unknown" — the caller treats this the same as
+     *  any other section that's already finished with a known, if zero, total). */
+    public static long dockerTotalReclaimable(DockerUsage usage) {
+        if (!usage.available()) return 0;
+        long total = 0;
+        for (var cat : usage.categories()) total += parseDockerSize(cat.reclaimable());
+        return total;
+    }
 
     /** What deleting/sizing a target actually touches on disk. */
     public sealed interface CleanupPlan {
@@ -135,6 +210,14 @@ public final class SystemCleanup {
         for (var entry : entries) {
             if (Files.isDirectory(entry) && !Files.isSymbolicLink(entry)) {
                 var name = entry.getFileName().toString();
+                // Never descend into a dependency/build-output folder we already just
+                // recorded as a whole artifact above (node_modules, vendor, target, ...):
+                // a nested package.json/pom.xml inside node_modules/some-lib is somebody
+                // else's published package, not "your project" — recursing into it used
+                // to produce noisy duplicate "projects" and wasted a lot of time walking
+                // enormous dependency trees for no benefit. ".git" is skipped outright for
+                // the same reason (never contains a project, just loose objects).
+                if (name.equals(".git") || ProjectType.isArtifactName(name)) continue;
                 if (!name.startsWith(".") || depth < 3) {
                     findInDir(entry, depth + 1, maxDepth, result);
                 }
@@ -142,10 +225,82 @@ public final class SystemCleanup {
         }
     }
 
+    // ── Docker ───────────────────────────────────────────────────────────
+
+    private static final List<String> DOCKER_DF_FIELDS = List.of("Type", "TotalCount", "Active", "Size", "Reclaimable");
+
+    /**
+     * Runs {@code docker system df} and parses its per-category breakdown (Images,
+     * Containers, Local Volumes, Build Cache). Replaces the old single blind
+     * "docker system prune -a -f --volumes" button with real, current numbers so the
+     * user can see what's actually reclaimable before deciding what to clean — and clean
+     * just one category at a time via {@link #dockerPruneArgsFor}.
+     */
+    public static DockerUsage dockerDiskUsage() {
+        String format = DOCKER_DF_FIELDS.stream().map(f -> "{{." + f + "}}").collect(Collectors.joining("\t"));
+        var result = runDocker("system", "df", "--format", format);
+        if (!result.success()) {
+            String msg = result.output() == null || result.output().isBlank()
+                    ? "Docker is not installed or the daemon is not running"
+                    : result.output().trim();
+            return new DockerUsage(false, msg, List.of());
+        }
+
+        var categories = new ArrayList<DockerCategory>();
+        for (var line : result.output().split("\n")) {
+            if (line.isBlank()) continue;
+            var parts = line.split("\t", -1);
+            if (parts.length < 5) continue;
+            categories.add(new DockerCategory(parts[0], parts[1], parts[2], parts[3], parts[4]));
+        }
+        return new DockerUsage(true, null, categories);
+    }
+
+    /** The {@code docker ... prune} subcommand+args that reclaims just one
+     *  {@code docker system df} category, or {@code null} if that category (e.g. an
+     *  unrecognized future Docker version's row) has no known single-category prune. */
+    public static String[] dockerPruneArgsFor(String dockerDfType) {
+        return switch (dockerDfType) {
+            case "Images" -> new String[]{"image", "prune", "-a", "-f"};
+            case "Containers" -> new String[]{"container", "prune", "-f"};
+            case "Local Volumes" -> new String[]{"volume", "prune", "-f"};
+            case "Build Cache" -> new String[]{"builder", "prune", "-f"};
+            default -> null;
+        };
+    }
+
+    /** Runs {@code docker <args>}, waiting up to a minute (prunes on a large local
+     *  registry can take a little while) and capturing combined stdout+stderr. */
+    public static CommandResult runDocker(String... args) {
+        try {
+            var command = new ArrayList<String>();
+            command.add("docker");
+            command.addAll(List.of(args));
+            var proc = new ProcessBuilder(command).redirectErrorStream(true).start();
+
+            boolean finished = proc.waitFor(60, TimeUnit.SECONDS);
+            String output;
+            try (var reader = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                output = reader.lines().collect(Collectors.joining("\n"));
+            }
+            if (!finished) {
+                proc.destroyForcibly();
+                return new CommandResult(false, "docker " + String.join(" ", args) + " timed out");
+            }
+            return new CommandResult(proc.exitValue() == 0, output);
+        } catch (IOException e) {
+            return new CommandResult(false, "Docker CLI not found on PATH: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new CommandResult(false, "Interrupted");
+        }
+    }
+
     private static String substituteVars(String raw) {
         if (OS.contains("win")) raw = raw.replace("/", "\\");
         raw = raw.replace("$HOME", USER_HOME);
         raw = raw.replace("%WINDIR%", envOr("WINDIR", "C:\\Windows"));
+        raw = raw.replace("%SYSTEMDRIVE%", envOr("SystemDrive", "C:"));
         raw = raw.replace("%TEMP%", envOr("TEMP", System.getProperty("java.io.tmpdir")));
         raw = raw.replace("%LOCALAPPDATA%", envOr("LOCALAPPDATA", USER_HOME + "\\AppData\\Local"));
         raw = raw.replace("%APPDATA%", envOr("APPDATA", USER_HOME + "\\AppData\\Roaming"));
@@ -227,15 +382,42 @@ public final class SystemCleanup {
             return matchesFilter(root, cutoffMillis, suffix) ? List.of(root) : List.of();
         }
         var result = new ArrayList<Path>();
-        try (var walk = Files.walk(root)) {
-            walk.filter(Files::isRegularFile)
-                    .filter(p -> matchesFilter(p, cutoffMillis, suffix))
-                    .forEach(result::add);
-        } catch (IOException ignored) {
-            // Partial results are acceptable — a permission error on a subtree just
-            // means those files are excluded from this cleanup pass.
-        }
+        walkFilesSafe(root, p -> {
+            if (matchesFilter(p, cutoffMillis, suffix)) result.add(p);
+        });
         return result;
+    }
+
+    /**
+     * Walks every regular file under {@code root}, invoking {@code onFile} for each one,
+     * and simply skipping any file/directory it can't access instead of aborting the
+     * whole walk. {@code Files.walk(root)} returns a *lazy* {@code Stream} that throws an
+     * {@code UncheckedIOException} — not caught by {@code catch (IOException)} — from the
+     * terminal operation (e.g. {@code .sum()}/{@code .forEach()}) the moment it hits an
+     * inaccessible subtree anywhere in the tree; on Windows, ACL-restricted folders like
+     * the legacy IE cache's {@code Content.IE5} or MSDTC's temp folder are common enough
+     * that this used to reliably crash the Cleanup tab's background scan. Using
+     * {@code Files.walkFileTree} with a visitor lets us return {@code CONTINUE} from
+     * {@code visitFileFailed} and keep going, counting everything that IS accessible.
+     */
+    private static void walkFilesSafe(Path root, Consumer<Path> onFile) {
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (attrs.isRegularFile()) onFile.accept(file);
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException ignored) {
+            // Files.walkFileTree only propagates an IOException for a failure the visitor
+            // itself doesn't handle (it doesn't for one it does) — nothing to recover from.
+        }
     }
 
     private static boolean matchesFilter(Path file, long cutoffMillis, String suffix) {
@@ -287,63 +469,120 @@ public final class SystemCleanup {
 
     public static long walkSizeSafe(Path path) {
         if (path == null || !Files.exists(path)) return 0;
-        try {
-            if (Files.isDirectory(path)) {
-                try (var stream = Files.walk(path)) {
-                    return stream.filter(Files::isRegularFile).mapToLong(SystemCleanup::safeSize).sum();
-                }
-            }
-            return Files.size(path);
-        } catch (IOException e) {
-            return 0;
-        }
+        if (!Files.isDirectory(path)) return safeSize(path);
+        long[] total = {0};
+        walkFilesSafe(path, p -> total[0] += safeSize(p));
+        return total[0];
     }
 
-    public static Map<Path, Long> calculateSizesViaElevation(List<Path> paths) {
-        if (paths.isEmpty()) return Map.of();
+    /** Result of an elevated size scan: partial/complete {@code sizes} plus a human-readable
+     *  {@code error} (null on full success) so the UI can tell "the user declined the UAC/
+     *  polkit/osascript admin prompt" or "the helper was blocked" apart from silent success. */
+    public record ElevationResult(Map<Path, Long> sizes, String error) {
+        public boolean success() { return error == null; }
+    }
+
+    public static ElevationResult calculateSizesViaElevation(List<Path> paths) {
+        if (paths.isEmpty()) return new ElevationResult(Map.of(), null);
         var result = new LinkedHashMap<Path, Long>();
+        String error;
 
         if (OS.contains("win")) {
-            calculateSizesViaElevationWindows(paths, result);
+            error = calculateSizesViaElevationWindows(paths, result);
         } else if (OS.contains("linux")) {
-            calculateSizesViaElevationLinux(paths, result);
+            error = calculateSizesViaElevationLinux(paths, result);
         } else if (OS.contains("mac")) {
-            calculateSizesViaElevationMac(paths, result);
+            error = calculateSizesViaElevationMac(paths, result);
+        } else {
+            error = "Elevated scanning is not supported on this platform";
         }
-        return result;
+        return new ElevationResult(result, error);
     }
 
-    private static void calculateSizesViaElevationWindows(List<Path> paths, Map<Path, Long> result) {
+    /** Windows error code for "the operation was canceled by the user" — the exit code
+     *  {@code Start-Process -Verb RunAs} reports when the UAC consent prompt is declined. */
+    private static final int ERROR_CANCELLED = 1223;
+
+    /**
+     * Elevates a small, disposable helper via {@code Start-Process -Verb RunAs} (the only way
+     * to trigger a real UAC consent prompt from a non-elevated Java process — there is no
+     * managed API for it). Two things bit us in earlier versions of this method and are worth
+     * calling out since they're easy to reintroduce:
+     * <ul>
+     *   <li>The helper script used to be written to disk as a {@code .ps1} file under
+     *       {@code %USERPROFILE%\.filescanner\run} and launched with {@code -File}. Corporate
+     *       AppLocker/WDAC policies commonly block script execution from user-writable
+     *       folders — the elevated process would then exit immediately (often before the UAC
+     *       prompt even appears) with no diagnostic surfaced anywhere. Passing the script as
+     *       {@code -EncodedCommand} instead runs it as inline interpreter input rather than a
+     *       script *file*, which isn't subject to that class of block, nor to
+     *       {@code ExecutionPolicy} (which a machine-wide Group Policy can force regardless of
+     *       the {@code -ExecutionPolicy Bypass} process-scope override anyway).</li>
+     *   <li>The exit code of the elevated process was never checked, so a declined UAC prompt
+     *       ({@link #ERROR_CANCELLED}) looked identical to "ran fine, found nothing" from the
+     *       caller's point of view. It's captured here via {@code -PassThru} on the *outer*
+     *       {@code Start-Process} call and returned as {@code error} so the UI can tell the
+     *       user what actually happened instead of just silently doing nothing.</li>
+     * </ul>
+     * Base64 (used by {@code -EncodedCommand}) never contains quotes or spaces, so — unlike
+     * the old raw path interpolation — it can be embedded in the outer {@code -ArgumentList}
+     * string with no escaping footguns.
+     */
+    private static String calculateSizesViaElevationWindows(List<Path> paths, Map<Path, Long> result) {
+        Path inputFile = null, outputFile = null, logFile = null;
         try {
             var runDir = Path.of(USER_HOME, ".filescanner", "run");
             Files.createDirectories(runDir);
             String token = Long.toHexString(System.nanoTime());
-            var inputFile = runDir.resolve("elevate-" + token + "-paths.txt");
-            var psScript = runDir.resolve("elevate-" + token + ".ps1");
-            var outputFile = runDir.resolve("elevate-" + token + "-output.json");
+            inputFile = runDir.resolve("elevate-" + token + "-paths.txt");
+            outputFile = runDir.resolve("elevate-" + token + "-output.json");
+            logFile = runDir.resolve("elevate-" + token + "-log.txt");
 
             Files.writeString(inputFile, String.join("\n", paths.stream().map(Path::toString).toList()));
 
-            var ps = new StringBuilder();
-            ps.append("$inputFile = '").append(inputFile).append("'\n");
-            ps.append("$outputFile = '").append(outputFile).append("'\n");
-            ps.append("$paths = Get-Content $inputFile\n");
-            ps.append("$results = @{}\n");
-            ps.append("foreach ($p in $paths) {\n");
-            ps.append("    if (Test-Path $p) {\n");
-            ps.append("        $total = 0\n");
-            ps.append("        Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $total += $_.Length }\n");
-            ps.append("        $results[$p] = $total\n");
-            ps.append("    } else { $results[$p] = 0 }\n");
-            ps.append("}\n");
-            ps.append("$results | ConvertTo-Json | Out-File $outputFile -Encoding UTF8\n");
-            Files.writeString(psScript, ps.toString());
+            var script = new StringBuilder();
+            script.append("$inputFile = '").append(psEscape(inputFile.toString())).append("'\n");
+            script.append("$outputFile = '").append(psEscape(outputFile.toString())).append("'\n");
+            script.append("$paths = Get-Content -LiteralPath $inputFile\n");
+            script.append("$results = @{}\n");
+            script.append("foreach ($p in $paths) {\n");
+            script.append("    if (Test-Path -LiteralPath $p) {\n");
+            script.append("        $total = 0\n");
+            script.append("        Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $total += $_.Length }\n");
+            script.append("        $results[$p] = $total\n");
+            script.append("    } else { $results[$p] = 0 }\n");
+            script.append("}\n");
+            script.append("$results | ConvertTo-Json | Out-File -LiteralPath $outputFile -Encoding UTF8\n");
 
-            new ProcessBuilder("powershell", "-Command",
-                    "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"" + psScript + "\"'")
+            String encoded = Base64.getEncoder().encodeToString(script.toString().getBytes(StandardCharsets.UTF_16LE));
+
+            // -PassThru surfaces the elevated process's ExitCode via $p.ExitCode even though
+            // it was launched with -Verb RunAs; "exit $p.ExitCode" propagates it out to the
+            // outer (non-elevated) powershell.exe's own exit code, which Java reads normally.
+            var outerCommand =
+                    "$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru " +
+                    "-ArgumentList '-NoProfile -WindowStyle Hidden -EncodedCommand " + encoded + "'; " +
+                    "exit $p.ExitCode";
+
+            var proc = new ProcessBuilder("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", outerCommand)
                     .redirectErrorStream(true)
-                    .start()
-                    .waitFor();
+                    .redirectOutput(logFile.toFile())
+                    .start();
+
+            boolean finished = proc.waitFor(120, TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return "Timed out waiting for the elevated helper (the UAC prompt may be hidden behind another window)";
+            }
+
+            int exit = proc.exitValue();
+            if (exit == ERROR_CANCELLED) {
+                return "Elevation request was declined (UAC prompt cancelled)";
+            }
+            if (exit != 0) {
+                LOG.warning("Elevated size scan exited with code " + exit + "; see " + logFile);
+                return "Elevated helper exited with code " + exit;
+            }
 
             if (Files.exists(outputFile)) {
                 var json = Files.readString(outputFile);
@@ -353,21 +592,33 @@ public final class SystemCleanup {
                         result.put(Path.of(entry.getKey()), entry.getValue() != null ? entry.getValue() : 0);
                     }
                 }
+                return null;
             }
-
-            try { Files.deleteIfExists(inputFile); } catch (IOException ignored) {}
-            try { Files.deleteIfExists(psScript); } catch (IOException ignored) {}
-            try { Files.deleteIfExists(outputFile); } catch (IOException ignored) {}
+            return "Elevated helper finished but produced no output; see " + logFile;
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Elevated size scan failed", e);
+            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        } finally {
+            try { if (inputFile != null) Files.deleteIfExists(inputFile); } catch (IOException ignored) {}
+            try { if (outputFile != null) Files.deleteIfExists(outputFile); } catch (IOException ignored) {}
+            try { if (logFile != null) Files.deleteIfExists(logFile); } catch (IOException ignored) {}
         }
     }
 
-    private static void calculateSizesViaElevationLinux(List<Path> paths, Map<Path, Long> result) {
+    /** Escapes a value for embedding inside a single-quoted PowerShell string literal
+     *  (doubling {@code '} is PowerShell's own escape for it) — without this, a user
+     *  profile path containing an apostrophe (e.g. {@code C:\Users\O'Brien}) would break
+     *  the generated script's syntax. */
+    private static String psEscape(String value) {
+        return value.replace("'", "''");
+    }
+
+    private static String calculateSizesViaElevationLinux(List<Path> paths, Map<Path, Long> result) {
+        Path script = null;
         try {
             var runDir = Path.of(USER_HOME, ".filescanner", "run");
             Files.createDirectories(runDir);
-            var script = runDir.resolve("elevate-" + Long.toHexString(System.nanoTime()) + ".sh");
+            script = runDir.resolve("elevate-" + Long.toHexString(System.nanoTime()) + ".sh");
             var sb = new StringBuilder("#!/bin/bash\n");
             for (var p : paths) {
                 sb.append("S=$(du -bs \"").append(p).append("\" 2>/dev/null | cut -f1)\n");
@@ -383,9 +634,11 @@ public final class SystemCleanup {
                     .redirectErrorStream(true)
                     .start();
 
+            var output = new StringBuilder();
             try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream()))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    output.append(line).append('\n');
                     var parts = line.trim().split(" ", 2);
                     if (parts.length == 2) {
                         try {
@@ -394,31 +647,58 @@ public final class SystemCleanup {
                     }
                 }
             }
-            proc.waitFor();
-            try { Files.deleteIfExists(script); } catch (IOException ignored) {}
+
+            boolean finished = proc.waitFor(120, TimeUnit.SECONDS);
+            if (!finished) {
+                proc.destroyForcibly();
+                return "Timed out waiting for pkexec (the authentication prompt may need attention)";
+            }
+            // pkexec: 126 = auth dialog dismissed/cancelled, 127 = not authorized.
+            if (proc.exitValue() == 126) return "Elevation request was declined (authentication dialog cancelled)";
+            if (proc.exitValue() == 127) return "Not authorized to elevate";
+            if (proc.exitValue() != 0) return "pkexec exited with code " + proc.exitValue() + (output.isEmpty() ? "" : ": " + output);
+            return null;
         } catch (Exception e) {
             LOG.log(Level.WARNING, "Elevated size scan failed", e);
+            return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+        } finally {
+            try { if (script != null) Files.deleteIfExists(script); } catch (IOException ignored) {}
         }
     }
 
-    private static void calculateSizesViaElevationMac(List<Path> paths, Map<Path, Long> result) {
+    private static String calculateSizesViaElevationMac(List<Path> paths, Map<Path, Long> result) {
         for (var p : paths) {
             try {
                 var proc = new ProcessBuilder("osascript", "-e",
                         "do shell script \"du -bs '" + p + "' 2>/dev/null | cut -f1\" with administrator privileges")
                         .redirectErrorStream(true)
                         .start();
+                var output = new StringBuilder();
                 try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream()))) {
-                    String line = reader.readLine();
-                    if (line != null) {
-                        try {
-                            result.put(p, Long.parseLong(line.trim()));
-                        } catch (NumberFormatException ignored) {}
-                    }
+                    String line;
+                    while ((line = reader.readLine()) != null) output.append(line).append('\n');
                 }
-                proc.waitFor();
-            } catch (Exception ignored) {}
+                boolean finished = proc.waitFor(120, TimeUnit.SECONDS);
+                if (!finished) {
+                    proc.destroyForcibly();
+                    return "Timed out waiting for the administrator prompt";
+                }
+                if (proc.exitValue() != 0) {
+                    // osascript's "with administrator privileges" throws error -128 when the
+                    // user cancels the prompt; its text ends up in our merged output.
+                    return output.toString().contains("-128") || output.toString().toLowerCase(Locale.ROOT).contains("cancel")
+                            ? "Elevation request was declined (administrator prompt cancelled)"
+                            : "osascript exited with code " + proc.exitValue() + (output.isEmpty() ? "" : ": " + output);
+                }
+                try {
+                    result.put(p, Long.parseLong(output.toString().trim()));
+                } catch (NumberFormatException ignored) {}
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Elevated size scan failed", e);
+                return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            }
         }
+        return null;
     }
 
     private static List<Target> loadTargets() {
@@ -466,7 +746,7 @@ public final class SystemCleanup {
     private static Target toTarget(TargetRecord r, String path) {
         return new Target(r.name, path, r.description, r.customCommand,
                 r.contentsOnly, r.daysOld, r.extension, r.filesOnly,
-                r.risk != null ? r.risk : "low");
+                r.risk != null ? r.risk : "low", r.actionOnly);
     }
 
     private static String pickOsPath(TargetRecord r, String mode) {
@@ -522,5 +802,6 @@ public final class SystemCleanup {
         String extension;
         boolean filesOnly;
         String risk;
+        boolean actionOnly;
     }
 }

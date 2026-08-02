@@ -1,13 +1,18 @@
 package by.snql.filescanner.ui;
 
+import by.snql.filescanner.config.Settings;
+import by.snql.filescanner.core.util.SizeFormat;
 import by.snql.filescanner.model.FileNode;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.scene.shape.ArcType;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
+import javafx.util.Duration;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +29,7 @@ import java.util.function.Consumer;
 public class RingsChart extends StackPane {
 
     private final Canvas canvas;
+    private final Tooltip tooltip = new Tooltip();
     private FileNode root;
     private Consumer<FileNode> onNodeClicked;
     private RingSegment[] currentSegments;
@@ -31,7 +37,15 @@ public class RingsChart extends StackPane {
 
     private static final double RING_WIDTH = 36;
     private static final double CENTER_RADIUS = 60;
-    private static final int MAX_RINGS = 6;
+
+    /** GNOME Baobab-style depth cap — kept in sync with {@code TreemapLayout}'s render depth
+     *  via {@code Settings.chartRenderDepth} ("Chart nesting depth" in Settings). Beyond this
+     *  many rings, deeper content is aggregated into its ancestor ring rather than drawn as
+     *  its own (increasingly thin, hard-to-read) band; click to drill down instead. The center
+     *  disk counts as one "ring", so this is {@code chartRenderDepth + 1}. */
+    private static int maxRings() {
+        return Math.max(1, Settings.get().chartRenderDepth) + 1;
+    }
 
     private static final Color[] PALETTE = {
             Color.rgb(0x34, 0x98, 0xDB), Color.rgb(0x2E, 0xCC, 0x71),
@@ -41,9 +55,15 @@ public class RingsChart extends StackPane {
             Color.rgb(0xC0, 0x39, 0x2B), Color.rgb(0x8E, 0x44, 0xAD)
     };
 
-    /** startAngle/sweepAngle are in the compass convention described on the class. */
+    /**
+     * startAngle/sweepAngle are in the compass convention described on the class.
+     * {@code truncated} is true when this node has children that aren't drawn as their own
+     * ring — depth cap reached, out of physical radius, or some children too thin an angle
+     * to render — so the UI can mark it instead of the chart just looking like a dead end.
+     */
     private record RingSegment(double centerX, double centerY, double innerR, double outerR,
-                                double startAngle, double sweepAngle, FileNode node, String label) {}
+                                double startAngle, double sweepAngle, FileNode node, String label,
+                                boolean truncated) {}
 
     public RingsChart() {
         canvas = new Canvas();
@@ -52,6 +72,10 @@ public class RingsChart extends StackPane {
         getChildren().add(canvas);
 
         setMinSize(200, 200);
+
+        tooltip.setShowDelay(Duration.millis(150));
+        tooltip.setHideDelay(Duration.ZERO);
+        Tooltip.install(canvas, tooltip);
 
         canvas.setOnMouseClicked(this::onMouseClicked);
         canvas.setOnMouseMoved(this::onMouseMoved);
@@ -108,23 +132,42 @@ public class RingsChart extends StackPane {
     private void computeRing(FileNode node, double cx, double cy,
                              int depth, double startAngle, double sweepAngle,
                              double maxR, List<RingSegment> result) {
-        if (depth >= MAX_RINGS || node == null || sweepAngle <= 0) return;
+        int maxRings = maxRings();
+        if (depth >= maxRings || node == null || sweepAngle <= 0) return;
 
         double innerR = depth == 0 ? 0 : CENTER_RADIUS + (depth - 1) * RING_WIDTH;
         double outerR = depth == 0 ? CENTER_RADIUS : CENTER_RADIUS + depth * RING_WIDTH;
 
         if (outerR > maxR) return;
 
+        boolean hasChildren = !node.isLeaf() && !node.getChildren().isEmpty();
+        boolean depthCapReached = depth + 1 >= maxRings;
+        boolean noRoomForNextRing = outerR + RING_WIDTH > maxR;
+
+        List<FileNode> children = null;
+        long total = 0;
+        boolean someChildTooThin = false;
+        if (hasChildren) {
+            children = new ArrayList<>(node.getChildren());
+            children.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+            total = children.stream().mapToLong(FileNode::getSize).sum();
+            if (total > 0) {
+                for (var c : children) {
+                    if ((double) c.getSize() / total * sweepAngle < 2.0) {
+                        someChildTooThin = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        boolean truncated = hasChildren && total > 0
+                && (depthCapReached || noRoomForNextRing || someChildTooThin);
+
         result.add(new RingSegment(cx, cy, innerR, outerR, startAngle, sweepAngle, node,
-                node.getName()));
+                node.getName(), truncated));
 
-        if (node.isLeaf() || node.getChildren().isEmpty()) return;
-
-        var children = new ArrayList<>(node.getChildren());
-        children.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
-
-        long total = children.stream().mapToLong(FileNode::getSize).sum();
-        if (total == 0) return;
+        if (!hasChildren || total == 0 || depthCapReached || noRoomForNextRing) return;
 
         double angle = startAngle;
         for (var child : children) {
@@ -155,6 +198,7 @@ public class RingsChart extends StackPane {
             } else {
                 drawAnnulusWedge(gc, seg);
                 drawArcLabel(gc, seg);
+                drawTruncatedMarker(gc, seg);
             }
         }
 
@@ -224,6 +268,23 @@ public class RingsChart extends StackPane {
         }
     }
 
+    /**
+     * Small dark arc along a truncated segment's outer edge — GNOME Baobab marks a ring
+     * segment whose children were cut off by its own depth limit the same way, rather than
+     * silently rendering nothing further and leaving the user unsure whether that folder
+     * is really empty or just not expanded here. Click it to drill down and see more.
+     */
+    private void drawTruncatedMarker(GraphicsContext gc, RingSegment seg) {
+        if (!seg.truncated()) return;
+        double jfxStart = toJfxStart(seg.startAngle);
+        double jfxExtent = toJfxExtent(seg.sweepAngle);
+
+        gc.setStroke(Color.rgb(0, 0, 0, 0.55));
+        gc.setLineWidth(2.5);
+        gc.strokeArc(seg.centerX() - seg.outerR(), seg.centerY() - seg.outerR(),
+                seg.outerR() * 2, seg.outerR() * 2, jfxStart, jfxExtent, ArcType.OPEN);
+    }
+
     private Color colorFor(FileNode node, double innerR) {
         if (node.isDirectory()) {
             int hash = node.getName().hashCode();
@@ -239,24 +300,47 @@ public class RingsChart extends StackPane {
     }
 
     private void onMouseMoved(MouseEvent e) {
-        var seg = segmentAt(e.getX(), e.getY());
-        canvas.setCursor(seg != null ? javafx.scene.Cursor.HAND : javafx.scene.Cursor.DEFAULT);
+        var dirSeg = segmentAt(e.getX(), e.getY());
+        canvas.setCursor(dirSeg != null ? javafx.scene.Cursor.HAND : javafx.scene.Cursor.DEFAULT);
+
+        var seg = anySegmentAt(e.getX(), e.getY());
+        if (seg != null) {
+            var node = seg.node;
+            String path = node.getPath() != null ? node.getPath().toString() : node.getName();
+            tooltip.setText(path + "\n" + SizeFormat.format(node.getSize()));
+        }
     }
 
     private RingSegment segmentAt(double dx, double dy) {
         if (currentSegments == null) return null;
         for (var seg : currentSegments) {
             if (!seg.node.isDirectory() || seg.innerR == 0) continue;
-            double dist = Math.sqrt(Math.pow(dx - seg.centerX, 2) + Math.pow(dy - seg.centerY, 2));
-            if (dist < seg.innerR || dist > seg.outerR) continue;
-
-            // Compass angle (0=N, clockwise+) of the point relative to the segment's center.
-            double angle = Math.toDegrees(Math.atan2(dx - seg.centerX, -(dy - seg.centerY)));
-            if (angle < 0) angle += 360;
-            if (angle >= seg.startAngle && angle <= seg.startAngle + seg.sweepAngle) {
-                return seg;
-            }
+            if (!segmentContains(seg, dx, dy)) continue;
+            return seg;
         }
         return null;
+    }
+
+    /** Like {@link #segmentAt} but also matches leaf/file segments and the root's center
+     *  disk — used for the hover tooltip, which should describe whatever is under the
+     *  cursor rather than only clickable directories. */
+    private RingSegment anySegmentAt(double dx, double dy) {
+        if (currentSegments == null) return null;
+        for (var seg : currentSegments) {
+            if (!segmentContains(seg, dx, dy)) continue;
+            return seg;
+        }
+        return null;
+    }
+
+    private static boolean segmentContains(RingSegment seg, double dx, double dy) {
+        double dist = Math.sqrt(Math.pow(dx - seg.centerX, 2) + Math.pow(dy - seg.centerY, 2));
+        if (dist < seg.innerR || dist > seg.outerR) return false;
+        if (seg.innerR == 0) return true; // center disk — angle is irrelevant
+
+        // Compass angle (0=N, clockwise+) of the point relative to the segment's center.
+        double angle = Math.toDegrees(Math.atan2(dx - seg.centerX, -(dy - seg.centerY)));
+        if (angle < 0) angle += 360;
+        return angle >= seg.startAngle && angle <= seg.startAngle + seg.sweepAngle;
     }
 }

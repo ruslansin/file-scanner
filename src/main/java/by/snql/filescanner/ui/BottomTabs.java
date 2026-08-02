@@ -44,10 +44,23 @@ public class BottomTabs {
     private final TableView<FileNode> oldFilesTable;
     private final ComboBox<String> ageFilter;
 
-    private final VBox cleanupBox;
+    // "Developer Cleanup" tab — merges what used to be two separate tabs ("Cleanup" for
+    // OS/tool caches and "Project Cleanup" for build artifacts) plus a new Docker
+    // breakdown, into one place: everything a developer would want to reclaim disk space
+    // from, in one scrollable view instead of three disconnected tabs.
+    private final VBox devCleanupBox;
+    private final Label totalReclaimableHeader = new Label();
+    private final VBox artifactsSection;
+    private final VBox dockerSection;
+    private final VBox cachesSection;
     private final List<SystemCleanup.Target> cleanupTargets;
 
-    private final VBox buildArtifactsBox;
+    // Tracks each section's known reclaimable total (-1 = not computed yet) so the combined
+    // header can be updated incrementally as each of the three sections finishes its own
+    // (independent, concurrent) background scan, without waiting for the slowest one.
+    private long artifactsReclaimable = -1;
+    private long dockerReclaimable = -1;
+    private long cachesReclaimable = -1;
 
     private final VBox compressBox;
     private final ComboBox<String> groupMode;
@@ -64,8 +77,8 @@ public class BottomTabs {
     private java.util.function.Consumer<String> onStatus = msg -> {};
 
     private static final int TAB_LARGEST = 0, TAB_TYPES = 1, TAB_DUPLICATES = 2, TAB_EMPTY = 3,
-            TAB_OLD = 4, TAB_CLEANUP = 5, TAB_ARTIFACTS = 6, TAB_COMPRESS = 7, TAB_GROUPS = 8, TAB_SNAPSHOTS = 9;
-    private static final int TAB_COUNT = 10;
+            TAB_OLD = 4, TAB_DEV_CLEANUP = 5, TAB_COMPRESS = 6, TAB_GROUPS = 7, TAB_SNAPSHOTS = 8;
+    private static final int TAB_COUNT = 9;
 
     private static final DateTimeFormatter DATE_FMT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault());
@@ -87,11 +100,13 @@ public class BottomTabs {
         ageFilter.setOnAction(e -> refreshOldFiles());
 
         cleanupTargets = SystemCleanup.targets();
-        cleanupBox = new VBox(10);
-        cleanupBox.setPadding(new Insets(5));
-
-        buildArtifactsBox = new VBox(10);
-        buildArtifactsBox.setPadding(new Insets(5));
+        artifactsSection = new VBox(8);
+        dockerSection = new VBox(8);
+        cachesSection = new VBox(8);
+        totalReclaimableHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 15px; -fx-text-fill: #27ae60;");
+        devCleanupBox = new VBox(16, totalReclaimableHeader, new Separator(),
+                artifactsSection, new Separator(), dockerSection, new Separator(), cachesSection);
+        devCleanupBox.setPadding(new Insets(5));
 
         compressBox = new VBox(10);
         compressBox.setPadding(new Insets(5));
@@ -114,20 +129,10 @@ public class BottomTabs {
                 createTab("Empty Dirs", wrap(emptyDirsTable)),
                 createTab("Old Files", buildOldFilesPanel()));
 
-        if (!cleanupTargets.isEmpty()) {
-            tabPane.getTabs().add(createTab("Cleanup", buildCleanupPanel()));
-        } else {
-            tabPane.getTabs().add(new Tab("Cleanup")); // keep index alignment; hidden below
-        }
-
-        tabPane.getTabs().add(createTab("Project Cleanup", buildArtifactsPanel()));
+        tabPane.getTabs().add(createTab("Developer Cleanup", buildDevCleanupPanel()));
         tabPane.getTabs().add(createTab("Compress", wrapScroll(compressBox)));
         tabPane.getTabs().add(createTab("Groups", buildGroupPanel()));
         tabPane.getTabs().add(createTab("Snapshots", buildSnapshotPanel()));
-
-        if (cleanupTargets.isEmpty()) {
-            tabPane.getTabs().get(TAB_CLEANUP).setDisable(true);
-        }
 
         tabPane.getSelectionModel().selectedIndexProperty().addListener((obs, oldIdx, newIdx) -> {
             refreshIfDirty(newIdx.intValue());
@@ -166,8 +171,7 @@ public class BottomTabs {
             case TAB_DUPLICATES -> refreshDuplicates();
             case TAB_EMPTY -> refreshEmptyDirs();
             case TAB_OLD -> refreshOldFiles();
-            case TAB_CLEANUP -> refreshCleanup();
-            case TAB_ARTIFACTS -> refreshBuildArtifacts();
+            case TAB_DEV_CLEANUP -> refreshDevCleanup();
             case TAB_COMPRESS -> refreshCompress();
             case TAB_GROUPS -> refreshGroups();
             case TAB_SNAPSHOTS -> refreshSnapshots();
@@ -411,22 +415,294 @@ public class BottomTabs {
         return scroll;
     }
 
-    // ── Cleanup ──────────────────────────────────────────────────────────
+    // ── Developer Cleanup (build artifacts + Docker + OS/tool caches) ──────
+    //
+    // Merges what used to be two separate, disconnected tabs ("Cleanup" for OS/tool
+    // caches, "Project Cleanup" for build artifacts) plus a new Docker breakdown into one
+    // place — the idea being a developer opens ONE tab to reclaim disk space, from Maven
+    // "target/" folders to unused Docker containers, instead of hunting across several tabs.
 
-    private void refreshCleanup() {
-        cleanupBox.getChildren().clear();
-        if (cleanupTargets.isEmpty()) return;
+    private void refreshDevCleanup() {
         long myGen = generation.get();
+        FileNode currentRoot = root;
 
-        var header = new Label("System & Developer caches \u2014 total: scanning in parallel...");
-        header.setStyle("-fx-font-weight: bold;");
-        cleanupBox.getChildren().add(header);
-        cleanupBox.getChildren().add(new Label("Scanning " + cleanupTargets.size() + " targets..."));
+        artifactsReclaimable = -1;
+        dockerReclaimable = -1;
+        cachesReclaimable = -1;
+        updateTotalReclaimableHeader();
 
+        artifactsSection.getChildren().setAll(new Label("Scanning project roots..."));
+        dockerSection.getChildren().setAll(new Label("Checking Docker..."));
+
+        if (cleanupTargets.isEmpty()) {
+            var h = new Label("Package & System Caches");
+            h.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+            cachesSection.getChildren().setAll(h, new Label("No cache targets found for this OS."));
+            cachesReclaimable = 0;
+            updateTotalReclaimableHeader();
+        } else {
+            cachesSection.getChildren().setAll(new Label("Scanning " + cleanupTargets.size() + " cache targets..."));
+            Thread.ofVirtual().start(() -> refreshCachesSection(myGen));
+        }
+
+        Thread.ofVirtual().start(() -> refreshArtifactsSection(myGen, currentRoot));
+        Thread.ofVirtual().start(() -> refreshDockerSection(myGen));
+    }
+
+    /**
+     * Recomputes the combined "how much space could I free right now" figure across all
+     * three sections. Each section reports {@code -1} until its own background scan
+     * finishes, so the total is shown as a running/partial figure ("so far") until all
+     * three are in, rather than blocking on whichever one happens to be slowest.
+     */
+    private void updateTotalReclaimableHeader() {
+        long sum = 0;
+        boolean allKnown = true;
+        if (artifactsReclaimable >= 0) sum += artifactsReclaimable; else allKnown = false;
+        if (dockerReclaimable >= 0) sum += dockerReclaimable; else allKnown = false;
+        if (cachesReclaimable >= 0) sum += cachesReclaimable; else allKnown = false;
+
+        totalReclaimableHeader.setText(
+                (allKnown ? "Total reclaimable: " : "Total reclaimable so far: ")
+                        + SizeFormat.format(sum)
+                        + (allKnown ? "" : " (still scanning\u2026)"));
+    }
+
+    private javafx.scene.Node buildDevCleanupPanel() {
+        var scroll = new ScrollPane(devCleanupBox);
+        scroll.setFitToWidth(true);
+        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        VBox.setVgrow(scroll, javafx.scene.layout.Priority.ALWAYS);
+
+        var refreshBtn = new Button("Refresh");
+        refreshBtn.setOnAction(e -> refreshDevCleanup());
+
+        var topBar = new HBox(10, refreshBtn, new Label(
+                "Build artifacts, Docker, and OS/tool caches in one place. " +
+                        "Edit ~/.filescanner/cleanup-targets.json for custom paths, or scan roots in Settings."));
+        topBar.setPadding(new Insets(0, 0, 5, 0));
+
+        return new VBox(8, topBar, scroll);
+    }
+
+    // -- Build artifacts --
+
+    private void refreshArtifactsSection(long myGen, FileNode currentRoot) {
+        if (!Settings.get().projectScanEnabled) {
+            Platform.runLater(() -> {
+                if (generation.get() != myGen) return;
+                artifactsSection.getChildren().setAll(new Label("Project scanning is disabled. Enable in Settings."));
+                artifactsReclaimable = 0;
+                updateTotalReclaimableHeader();
+            });
+            return;
+        }
+
+        // Scan both the user-configured roots AND whatever folder is currently open in the
+        // main scan, so this "just works" over the project you're already looking at
+        // instead of requiring separate scan-root configuration first.
+        var roots = new ArrayList<>(SystemCleanup.scanRoots());
+        var currentPath = currentRoot != null ? currentRoot.getPath() : null;
+        if (currentPath != null && Files.isDirectory(currentPath) && !roots.contains(currentPath)) {
+            roots.add(currentPath);
+        }
+
+        var artifacts = SystemCleanup.findBuildArtifacts(roots);
+        // Compute sizes on this background thread — NOT inside Platform.runLater.
+        var sizes = new java.util.HashMap<SystemCleanup.BuildArtifact, Long>();
+        long total = 0;
+        for (var a : artifacts) {
+            long size = SystemCleanup.walkSizeSafe(a.path());
+            sizes.put(a, size);
+            total += size;
+        }
+        long finalTotal = total;
+
+        Platform.runLater(() -> {
+            if (generation.get() != myGen) return;
+            artifactsReclaimable = finalTotal;
+            updateTotalReclaimableHeader();
+            renderBuildArtifacts(artifacts, sizes, finalTotal);
+        });
+    }
+
+    private void renderBuildArtifacts(List<SystemCleanup.BuildArtifact> artifacts,
+                                       Map<SystemCleanup.BuildArtifact, Long> sizes, long totalSize) {
+        artifactsSection.getChildren().clear();
+
+        var sectionHeader = new Label("Build Artifacts");
+        sectionHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+        artifactsSection.getChildren().add(sectionHeader);
+
+        if (artifacts.isEmpty()) {
+            artifactsSection.getChildren().add(new Label(
+                    "No build artifacts found in configured roots or the currently scanned folder."));
+            return;
+        }
+
+        var summary = new Label("Total: " + SizeFormat.format(totalSize) + " in " + artifacts.size() + " artifacts");
+        var deleteAllBtn = new Button("Delete All (" + SizeFormat.format(totalSize) + ")");
+        deleteAllBtn.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold;");
+        deleteAllBtn.setOnAction(e -> {
+            if (!confirmDelete("Delete " + artifacts.size() + " build artifacts?",
+                    "Total: " + SizeFormat.format(totalSize) + "\n\nThese can be regenerated by rebuilding the projects.")) {
+                return;
+            }
+            var paths = artifacts.stream().map(SystemCleanup.BuildArtifact::path).toList();
+            var result = DeletionService.delete(paths, Settings.get().moveToTrash);
+            reportDeletionResult(result);
+            refreshDevCleanup();
+        });
+        artifactsSection.getChildren().add(new HBox(10, summary, deleteAllBtn));
+
+        var grid = new javafx.scene.layout.GridPane();
+        grid.setHgap(10);
+        grid.setVgap(5);
+        setColumnConstraints(grid, col(160, 120, false), col(90, 70, false), col(280, 150, true), col(140, 130, false));
+
+        int row = 0;
+        String lastType = "";
+
+        for (var a : artifacts) {
+            long size = sizes.getOrDefault(a, 0L);
+
+            if (!a.projectType().displayName().equals(lastType)) {
+                lastType = a.projectType().displayName();
+                var typeLabel = new Label(lastType + " (" + a.projectType().name() + ")");
+                typeLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #3498db;");
+                grid.add(typeLabel, 0, row++, 4, 1);
+            }
+
+            var nameLabel = new Label("  " + a.artifactName());
+            var sizeLabel = new Label(SizeFormat.format(size));
+            var pathLabel = new Label(a.projectDir().toString());
+            pathLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
+
+            grid.add(nameLabel, 0, row);
+            grid.add(sizeLabel, 1, row);
+            grid.add(pathLabel, 2, row);
+
+            var actions = new HBox(5);
+            var openBtn = new Button("Open");
+            openBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6;");
+            openBtn.setOnAction(e -> {
+                try {
+                    if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(a.path().toFile());
+                } catch (IOException ex) {
+                    reportStatus("Cannot open: " + ex.getMessage());
+                }
+            });
+
+            var deleteBtn = new Button("Delete");
+            deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
+            deleteBtn.setOnAction(e -> {
+                if (!confirmDelete("Delete build artifact?", a.path() + "\nSize: " + SizeFormat.format(size))) return;
+                var result = DeletionService.delete(List.of(a.path()), Settings.get().moveToTrash);
+                reportDeletionResult(result);
+                refreshDevCleanup();
+            });
+
+            actions.getChildren().addAll(openBtn, deleteBtn);
+            grid.add(actions, 3, row);
+            row++;
+        }
+        artifactsSection.getChildren().add(grid);
+    }
+
+    // -- Docker --
+
+    private void refreshDockerSection(long myGen) {
+        var usage = SystemCleanup.dockerDiskUsage();
+        long reclaimable = SystemCleanup.dockerTotalReclaimable(usage);
+        Platform.runLater(() -> {
+            if (generation.get() != myGen) return;
+            dockerReclaimable = reclaimable;
+            updateTotalReclaimableHeader();
+            renderDocker(usage);
+        });
+    }
+
+    private void renderDocker(SystemCleanup.DockerUsage usage) {
+        dockerSection.getChildren().clear();
+
+        var sectionHeader = new Label("Docker");
+        sectionHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+        dockerSection.getChildren().add(sectionHeader);
+
+        if (!usage.available()) {
+            dockerSection.getChildren().add(new Label(
+                    usage.error() != null ? usage.error() : "Docker is not available."));
+            return;
+        }
+        if (usage.categories().isEmpty()) {
+            dockerSection.getChildren().add(new Label("Docker reported no usage data."));
+            return;
+        }
+
+        dockerSection.getChildren().add(new Label(
+                "Reclaimable: \u2248 " + SizeFormat.format(SystemCleanup.dockerTotalReclaimable(usage))
+                        + " (estimated from Docker's own reported sizes)"));
+
+        var grid = new javafx.scene.layout.GridPane();
+        grid.setHgap(10);
+        grid.setVgap(5);
+        setColumnConstraints(grid, col(120, 90, false), col(60, 50, false), col(60, 50, false),
+                col(90, 70, false), col(140, 100, true), col(90, 80, false));
+        grid.add(new Label("Type"), 0, 0);
+        grid.add(new Label("Total"), 1, 0);
+        grid.add(new Label("Active"), 2, 0);
+        grid.add(new Label("Size"), 3, 0);
+        grid.add(new Label("Reclaimable"), 4, 0);
+
+        int row = 1;
+        for (var cat : usage.categories()) {
+            grid.add(new Label(cat.type()), 0, row);
+            grid.add(new Label(cat.total()), 1, row);
+            grid.add(new Label(cat.active()), 2, row);
+            grid.add(new Label(cat.size()), 3, row);
+            grid.add(new Label(cat.reclaimable()), 4, row);
+
+            var pruneArgs = SystemCleanup.dockerPruneArgsFor(cat.type());
+            if (pruneArgs != null) {
+                var cleanBtn = new Button("Clean");
+                cleanBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
+                cleanBtn.setOnAction(e -> confirmAndRunDocker("Remove unused " + cat.type() + "?", pruneArgs));
+                grid.add(cleanBtn, 5, row);
+            }
+            row++;
+        }
+        dockerSection.getChildren().add(grid);
+
+        var pruneAllBtn = new Button("Clean Everything Unused");
+        pruneAllBtn.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold;");
+        pruneAllBtn.setOnAction(e -> confirmAndRunDocker(
+                "Remove ALL unused Docker data (containers, images, networks, volumes, build cache)?",
+                new String[]{"system", "prune", "-a", "-f", "--volumes"}));
+        dockerSection.getChildren().add(pruneAllBtn);
+    }
+
+    private void confirmAndRunDocker(String confirmMessage, String[] args) {
+        if (!confirmDelete(confirmMessage, "Runs: docker " + String.join(" ", args))) return;
+
+        dockerSection.getChildren().add(new Label("Running docker " + String.join(" ", args) + "..."));
+        long myGen = generation.get();
         Thread.ofVirtual().start(() -> {
-            var sizes = new java.util.concurrent.ConcurrentHashMap<SystemCleanup.Target, Long>();
-            var needsElevationList = java.util.Collections.synchronizedList(new ArrayList<Path>());
+            var result = SystemCleanup.runDocker(args);
+            Platform.runLater(() -> {
+                if (generation.get() != myGen) return;
+                reportStatus(result.success() ? "Docker cleanup finished" : "Docker cleanup failed: " + result.output());
+                refreshDockerSection(myGen);
+            });
+        });
+    }
 
+    // -- Package & system caches --
+
+    private void refreshCachesSection(long myGen) {
+        var sizes = new java.util.concurrent.ConcurrentHashMap<SystemCleanup.Target, Long>();
+        var needsElevationList = java.util.Collections.synchronizedList(new ArrayList<Path>());
+
+        try {
             try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
                 var futures = cleanupTargets.stream()
                         .map(target -> java.util.concurrent.CompletableFuture.runAsync(() -> {
@@ -440,19 +716,35 @@ public class BottomTabs {
                         .toArray(java.util.concurrent.CompletableFuture[]::new);
                 java.util.concurrent.CompletableFuture.allOf(futures).join();
             }
-
+        } catch (Exception ex) {
+            // Defense in depth: SystemCleanup.calculateSize() should no longer throw
+            // (see walkFilesSafe), but a single bad target must never leave the section
+            // stuck on "Scanning..." forever with only an unlogged console stack trace.
             Platform.runLater(() -> {
                 if (generation.get() != myGen) return;
-                cleanupBox.getChildren().clear();
-                var h = new Label("System & Developer caches \u2014 total: (calculating...)");
-                h.setStyle("-fx-font-weight: bold;");
-                cleanupBox.getChildren().add(h);
-
-                var grid = buildCleanupGrid(cleanupTargets, sizes, h, needsElevationList);
-                cleanupBox.getChildren().add(grid);
-                maybeShowElevateButton(needsElevationList, grid, h);
+                cachesSection.getChildren().setAll(new Label("Failed to scan cleanup targets: " + ex.getMessage()));
             });
+            return;
+        }
+
+        Platform.runLater(() -> {
+            if (generation.get() != myGen) return;
+            cachesReclaimable = sizes.values().stream().mapToLong(Long::longValue).sum();
+            updateTotalReclaimableHeader();
+            renderCaches(sizes, needsElevationList);
         });
+    }
+
+    private void renderCaches(Map<SystemCleanup.Target, Long> sizes, List<Path> needsElevationList) {
+        cachesSection.getChildren().clear();
+
+        var sectionHeader = new Label("Package & System Caches \u2014 total: (calculating...)");
+        sectionHeader.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+        cachesSection.getChildren().add(sectionHeader);
+
+        var grid = buildCleanupGrid(cleanupTargets, sizes, sectionHeader, needsElevationList);
+        cachesSection.getChildren().add(grid);
+        maybeShowElevateButton(needsElevationList, grid, sectionHeader);
     }
 
     private javafx.scene.layout.GridPane buildCleanupGrid(
@@ -463,6 +755,7 @@ public class BottomTabs {
         var grid = new javafx.scene.layout.GridPane();
         grid.setHgap(10);
         grid.setVgap(5);
+        setColumnConstraints(grid, col(200, 150, false), col(90, 70, false), col(320, 150, true), col(190, 140, false));
 
         long grandTotal = 0;
         int row = 0;
@@ -504,16 +797,18 @@ public class BottomTabs {
                 actions.getChildren().add(cmdBtn);
             }
 
-            var deleteBtn = new Button("Delete");
-            deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
-            deleteBtn.setOnAction(e -> deleteCleanupTarget(target, resolved, size));
-            actions.getChildren().add(deleteBtn);
+            if (!target.actionOnly()) {
+                var deleteBtn = new Button("Delete");
+                deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
+                deleteBtn.setOnAction(e -> deleteCleanupTarget(target, resolved, size));
+                actions.getChildren().add(deleteBtn);
+            }
 
             grid.add(actions, 3, row);
             row++;
         }
 
-        header.setText("System & Developer caches \u2014 total: " + SizeFormat.format(grandTotal));
+        header.setText("Package & System Caches \u2014 total: " + SizeFormat.format(grandTotal));
         return grid;
     }
 
@@ -545,7 +840,7 @@ public class BottomTabs {
         }
         var result = SystemCleanup.delete(target);
         reportDeletionResult(result);
-        refreshCleanup();
+        refreshDevCleanup();
     }
 
     private void maybeShowElevateButton(List<Path> needsElevation,
@@ -558,9 +853,9 @@ public class BottomTabs {
             elevateBtn.setDisable(true);
             elevateBtn.setText("Requesting elevated access...");
             Thread.ofVirtual().start(() -> {
-                var sizes = SystemCleanup.calculateSizesViaElevation(needsElevation);
+                var elevation = SystemCleanup.calculateSizesViaElevation(needsElevation);
                 Platform.runLater(() -> {
-                    for (var entry : sizes.entrySet()) {
+                    for (var entry : elevation.sizes().entrySet()) {
                         for (int i = 0; i < cleanupTargets.size(); i++) {
                             var t = cleanupTargets.get(i);
                             var r = SystemCleanup.resolvePath(t);
@@ -573,157 +868,22 @@ public class BottomTabs {
                     }
                     elevateBtn.setText("Scan as Root");
                     elevateBtn.setDisable(false);
-                    header.setText("System & Developer caches \u2014 total: (refresh to recalculate)");
+                    if (!elevation.success()) {
+                        // Surface *why* nothing happened instead of leaving the button/labels
+                        // looking like the click was silently ignored (e.g. UAC declined,
+                        // policy-blocked helper, timed-out prompt hidden behind another window).
+                        var alert = new Alert(Alert.AlertType.WARNING);
+                        alert.setTitle("Elevated scan failed");
+                        alert.setHeaderText("Could not complete the elevated scan");
+                        alert.setContentText(elevation.error());
+                        alert.showAndWait();
+                    } else {
+                        header.setText("Package & System Caches \u2014 total: (refresh to recalculate)");
+                    }
                 });
             });
         });
-        cleanupBox.getChildren().add(elevateBtn);
-    }
-
-    private javafx.scene.Node buildCleanupPanel() {
-        var scroll = new ScrollPane(cleanupBox);
-        scroll.setFitToWidth(true);
-        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        VBox.setVgrow(scroll, javafx.scene.layout.Priority.ALWAYS);
-
-        var refreshBtn = new Button("Refresh");
-        refreshBtn.setOnAction(e -> refreshCleanup());
-
-        var topBar = new HBox(10, refreshBtn, new Label(
-                "Edit ~/.filescanner/cleanup-targets.json to add your own paths"));
-        topBar.setPadding(new Insets(0, 0, 5, 0));
-
-        return new VBox(8, topBar, scroll);
-    }
-
-    // ── Project Cleanup (build artifacts) ───────────────────────────────
-
-    private void refreshBuildArtifacts() {
-        buildArtifactsBox.getChildren().clear();
-
-        if (!Settings.get().projectScanEnabled) {
-            buildArtifactsBox.getChildren().add(new Label("Project scanning is disabled. Enable in Settings."));
-            return;
-        }
-
-        buildArtifactsBox.getChildren().add(new Label("Scanning project roots..."));
-        long myGen = generation.get();
-
-        Thread.ofVirtual().start(() -> {
-            var roots = SystemCleanup.scanRoots();
-            var artifacts = SystemCleanup.findBuildArtifacts(roots);
-            // Compute sizes on this background thread — NOT inside Platform.runLater.
-            var sizes = new java.util.HashMap<SystemCleanup.BuildArtifact, Long>();
-            long total = 0;
-            for (var a : artifacts) {
-                long size = SystemCleanup.walkSizeSafe(a.path());
-                sizes.put(a, size);
-                total += size;
-            }
-            long finalTotal = total;
-
-            Platform.runLater(() -> {
-                if (generation.get() != myGen) return;
-                renderBuildArtifacts(artifacts, sizes, finalTotal);
-            });
-        });
-    }
-
-    private void renderBuildArtifacts(List<SystemCleanup.BuildArtifact> artifacts,
-                                       Map<SystemCleanup.BuildArtifact, Long> sizes, long totalSize) {
-        buildArtifactsBox.getChildren().clear();
-
-        if (artifacts.isEmpty()) {
-            buildArtifactsBox.getChildren().add(new Label("No build artifacts found in scan roots."));
-            return;
-        }
-
-        var grid = new javafx.scene.layout.GridPane();
-        grid.setHgap(10);
-        grid.setVgap(5);
-
-        int row = 0;
-        String lastType = "";
-
-        for (var a : artifacts) {
-            long size = sizes.getOrDefault(a, 0L);
-
-            if (!a.projectType().displayName().equals(lastType)) {
-                lastType = a.projectType().displayName();
-                var typeLabel = new Label(lastType + " (" + a.projectType().name() + ")");
-                typeLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #3498db;");
-                grid.add(typeLabel, 0, row++, 4, 1);
-            }
-
-            var nameLabel = new Label("  " + a.artifactName());
-            var sizeLabel = new Label(SizeFormat.format(size));
-            var pathLabel = new Label(a.projectDir().toString());
-            pathLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-
-            grid.add(nameLabel, 0, row);
-            grid.add(sizeLabel, 1, row);
-            grid.add(pathLabel, 2, row);
-
-            var actions = new HBox(5);
-            var openBtn = new Button("Open");
-            openBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6;");
-            openBtn.setOnAction(e -> {
-                try {
-                    if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(a.path().toFile());
-                } catch (IOException ex) {
-                    reportStatus("Cannot open: " + ex.getMessage());
-                }
-            });
-
-            var deleteBtn = new Button("Delete");
-            deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
-            deleteBtn.setOnAction(e -> {
-                if (!confirmDelete("Delete build artifact?", a.path() + "\nSize: " + SizeFormat.format(size))) return;
-                var result = DeletionService.delete(List.of(a.path()), Settings.get().moveToTrash);
-                reportDeletionResult(result);
-                refreshBuildArtifacts();
-            });
-
-            actions.getChildren().addAll(openBtn, deleteBtn);
-            grid.add(actions, 3, row);
-            row++;
-        }
-
-        var header = new Label("Project Build Artifacts \u2014 total: " + SizeFormat.format(totalSize) +
-                " in " + artifacts.size() + " artifacts");
-        header.setStyle("-fx-font-weight: bold;");
-        buildArtifactsBox.getChildren().add(header);
-
-        var deleteAllBtn = new Button("Delete All (" + SizeFormat.format(totalSize) + ")");
-        deleteAllBtn.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold;");
-        deleteAllBtn.setOnAction(e -> {
-            if (!confirmDelete("Delete " + artifacts.size() + " build artifacts?",
-                    "Total: " + SizeFormat.format(totalSize) + "\n\nThese can be regenerated by rebuilding the projects.")) {
-                return;
-            }
-            var paths = artifacts.stream().map(SystemCleanup.BuildArtifact::path).toList();
-            var result = DeletionService.delete(paths, Settings.get().moveToTrash);
-            reportDeletionResult(result);
-            refreshBuildArtifacts();
-        });
-        buildArtifactsBox.getChildren().add(deleteAllBtn);
-        buildArtifactsBox.getChildren().add(grid);
-    }
-
-    private javafx.scene.Node buildArtifactsPanel() {
-        var scroll = new ScrollPane(buildArtifactsBox);
-        scroll.setFitToWidth(true);
-        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        VBox.setVgrow(scroll, javafx.scene.layout.Priority.ALWAYS);
-
-        var refreshBtn = new Button("Refresh");
-        refreshBtn.setOnAction(e -> refreshBuildArtifacts());
-
-        var topBar = new HBox(10, refreshBtn, new Label(
-                "Scans configured roots for build folders. Edit scan roots in Settings."));
-        topBar.setPadding(new Insets(0, 0, 5, 0));
-
-        return new VBox(8, topBar, scroll);
+        cachesSection.getChildren().add(elevateBtn);
     }
 
     // ── Compress ─────────────────────────────────────────────────────────
@@ -941,6 +1101,27 @@ public class BottomTabs {
     }
 
     // ── Shared helpers ───────────────────────────────────────────────────
+
+    /**
+     * Fixes column widths on the cleanup/artifact/Docker grids so the actions column
+     * (Open/Run/Delete/Clean buttons) always keeps its minimum width instead of being
+     * squeezed down to nothing when the panel is narrow — only the designated "grow" column
+     * (description/path, or nothing in the Docker grid) absorbs any extra or missing width.
+     * Without this, {@code GridPane} shrinks every column's content roughly proportionally
+     * to fit the available width, which is exactly what made the button column unreadable.
+     */
+    private static void setColumnConstraints(javafx.scene.layout.GridPane grid,
+                                              javafx.scene.layout.ColumnConstraints... constraints) {
+        grid.getColumnConstraints().setAll(constraints);
+    }
+
+    private static javafx.scene.layout.ColumnConstraints col(double prefWidth, double minWidth, boolean grow) {
+        var c = new javafx.scene.layout.ColumnConstraints();
+        c.setPrefWidth(prefWidth);
+        c.setMinWidth(minWidth);
+        c.setHgrow(grow ? javafx.scene.layout.Priority.ALWAYS : javafx.scene.layout.Priority.NEVER);
+        return c;
+    }
 
     private boolean confirmDelete(String header, String details) {
         var alert = new Alert(Alert.AlertType.CONFIRMATION);

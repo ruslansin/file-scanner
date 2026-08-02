@@ -1,12 +1,16 @@
 {
   "windows": [
     { "name": "Windows Update Cache",      "path": "%WINDIR%\\SoftwareDistribution\\Download", "description": "Cached Windows Update files. Safe — Windows re-downloads what it needs." },
+    { "name": "Windows Update DataStore",  "path": "%WINDIR%\\SoftwareDistribution\\DataStore", "description": "Windows Update history/metadata database. Safe to clear — Windows rebuilds it; stop the 'Windows Update' service first if deletion fails.", "contentsOnly": true, "risk": "high" },
     { "name": "System Temp",                "path": "%WINDIR%\\Temp",                            "description": "Temporary system files", "contentsOnly": true },
     { "name": "User Temp",                  "path": "%TEMP%",                                    "description": "User temporary files", "contentsOnly": true, "daysOld": 1 },
     { "name": "Delivery Optimization",      "path": "%WINDIR%\\DeliveryOptimization",            "description": "P2P update sharing cache", "contentsOnly": true },
     { "name": "CBS Logs",                   "path": "%WINDIR%\\Logs\\CBS",                       "description": "Component servicing logs", "contentsOnly": true },
     { "name": "Thumbnail Cache",            "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db", "description": "Thumbnail cache files", "filesOnly": true },
-    { "name": "IE/Edge Cache",              "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",    "description": "Internet Explorer / Edge cache", "contentsOnly": true }
+    { "name": "IE/Edge Cache",              "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",    "description": "Internet Explorer / Edge cache", "contentsOnly": true },
+    { "name": "Windows.old",                "path": "%SYSTEMDRIVE%\\Windows.old",                "description": "Previous Windows installation kept after an upgrade (normally auto-removed after ~10 days). Often tens of GB; some files may need administrator rights to remove.", "risk": "high" },
+    { "name": "Windows Component Store (WinSxS)", "path": "%WINDIR%\\WinSxS", "description": "Servicing component store for Windows Update/DISM. Never delete these files directly — that breaks Windows. Use 'Run' to reclaim space safely via DISM's component cleanup (requires admin, may take a while).", "customCommand": "powershell -NoProfile -Command \"Start-Process Dism.exe -ArgumentList '/Online /Cleanup-Image /StartComponentCleanup' -Verb RunAs\"", "risk": "high", "actionOnly": true },
+    { "name": "Hibernation File (hiberfil.sys)",  "path": "%SYSTEMDRIVE%\\hiberfil.sys",         "description": "Reserved space equal to your installed RAM for hibernation/Fast Startup. Use 'Run' to disable hibernation and free this space (re-enable anytime with 'powercfg /hibernate on').", "customCommand": "powershell -NoProfile -Command \"Start-Process powercfg -ArgumentList '/hibernate off' -Verb RunAs\"", "risk": "high", "actionOnly": true }
   ],
 
   "linux": [
@@ -40,13 +44,7 @@
     { "name": "Yarn Cache",                 "path": "$HOME/.yarn/cache",     "winPath": "%LOCALAPPDATA%\\Yarn\\cache", "description": "Yarn package cache" },
     { "name": "Composer Cache",             "path": "$HOME/.composer/cache",                     "description": "PHP Composer cache" },
     { "name": "RubyGems Cache",             "path": "$HOME/.gem/cache",                          "description": "Ruby gem cache" },
-    { "name": "Docker BuildKit",            "path": "$HOME/.docker/buildkit",                    "description": "Docker BuildKit cache" },
-    { "name": "Docker Cleanup",             "path": "$HOME/.docker",                            "description": "Remove unused Docker data (images, containers, volumes not in use)", "customCommand": "docker system prune -a -f --volumes 2>/dev/null || echo 'docker not running'", "risk": "high" },
-    { "name": "Docker Images (native)",     "linuxPath": "/var/lib/docker/overlay2",                "description": "Docker image layers — run: docker system prune -a" },
-    { "name": "Docker Volumes (native)",    "linuxPath": "/var/lib/docker/volumes",                 "description": "Docker named volumes — run: docker volume prune" },
-    { "name": "Docker Temp (native)",       "linuxPath": "/var/lib/docker/tmp",                     "description": "Docker temporary files" },
-    { "name": "Docker Images (rootless)",   "linuxPath": "$HOME/.local/share/docker/overlay2",      "description": "Docker rootless image layers" },
-    { "name": "Docker Volumes (rootless)",  "linuxPath": "$HOME/.local/share/docker/volumes",       "description": "Docker rootless volumes" },
+    { "name": "Docker BuildKit",            "path": "$HOME/.docker/buildkit",                    "description": "Docker BuildKit cache (also shown, more reliably, in the Docker panel above via 'docker system df')" },
     { "name": "Docker Desktop WSL disk",    "winPath": "%LOCALAPPDATA%\\Docker\\wsl",                "description": "Docker Desktop WSL2 virtual disk" },
     { "name": "Docker Desktop config",      "winPath": "%APPDATA%\\Docker",                          "description": "Docker Desktop config and metadata" },
     { "name": "Docker Desktop VM disk",     "macPath": "$HOME/Library/Containers/com.docker.docker/Data", "description": "Docker Desktop VM data" },

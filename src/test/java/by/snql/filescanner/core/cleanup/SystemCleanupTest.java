@@ -124,7 +124,7 @@ class SystemCleanupTest {
             // elevation prompt (UAC / pkexec / osascript), which must never happen as
             // a side effect of running the unit test suite.
             var result = SystemCleanup.calculateSizesViaElevation(List.of());
-            assertTrue(result.isEmpty());
+            assertTrue(result.sizes().isEmpty());
         }
     }
 }

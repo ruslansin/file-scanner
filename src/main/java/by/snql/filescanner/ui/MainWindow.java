@@ -23,18 +23,25 @@ import javafx.stage.Stage;
 
 import java.awt.Desktop;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public class MainWindow {
 
+    private static final String DEFAULT_TITLE = "File Scanner \u2014 Disk Space Analyzer";
+
     private final Stage stage;
     private final FileScanner scanner;
+    private ScheduledExecutorService memoryMonitor;
     private final TreemapChart treemapChart;
     private final RingsChart ringsChart;
     private final StackPane chartStack;
@@ -225,7 +232,7 @@ public class MainWindow {
         scene.addEventHandler(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setupDragAndDrop(scene);
 
-        stage.setTitle("File Scanner \u2014 Disk Space Analyzer");
+        stage.setTitle(DEFAULT_TITLE);
         stage.setScene(scene);
         stage.setMinWidth(800);
         stage.setMinHeight(600);
@@ -454,6 +461,8 @@ public class MainWindow {
         viewStack.clear();
         bottomTabs.setRoot(null);
 
+        startMemoryMonitor();
+
         var lastUpdate = new long[]{0};
         scanner.scan(rootPath, p -> maybeUpdate(() -> progressBar.setProgress(p), lastUpdate),
                         partial -> Platform.runLater(() -> {
@@ -464,6 +473,7 @@ public class MainWindow {
                             sizeLabel.setText(SizeFormat.format(partial.getSize()));
                         }))
                 .thenAccept(root -> Platform.runLater(() -> {
+                    stopMemoryMonitor();
                     progressBar.setProgress(1.0);
                     if (root == null) {
                         statusLabel.setText("Scan cancelled");
@@ -488,6 +498,7 @@ public class MainWindow {
                 }))
                 .exceptionally(ex -> {
                     Platform.runLater(() -> {
+                        stopMemoryMonitor();
                         showError("Scan Error", "Scan failed", ex.getMessage());
                         progressBar.setVisible(false);
                         cancelButton.setVisible(false);
@@ -495,6 +506,43 @@ public class MainWindow {
                     });
                     return null;
                 });
+    }
+
+    private void startMemoryMonitor() {
+        stopMemoryMonitor();
+        memoryMonitor = Executors.newSingleThreadScheduledExecutor(r -> {
+            var t = new Thread(r, "memory-monitor");
+            t.setDaemon(true);
+            return t;
+        });
+        memoryMonitor.scheduleAtFixedRate(() -> {
+            var title = formatMemoryTitle();
+            Platform.runLater(() -> stage.setTitle(title));
+        }, 0, 1, TimeUnit.SECONDS);
+    }
+
+    private void stopMemoryMonitor() {
+        if (memoryMonitor != null) {
+            memoryMonitor.shutdownNow();
+            memoryMonitor = null;
+        }
+        stage.setTitle(DEFAULT_TITLE);
+    }
+
+    private static String formatMemoryTitle() {
+        var rt = Runtime.getRuntime();
+        long usedHeap = rt.totalMemory() - rt.freeMemory();
+        long maxHeap = rt.maxMemory();
+
+        var memBean = ManagementFactory.getMemoryMXBean();
+        var nonHeap = memBean.getNonHeapMemoryUsage();
+        long usedMeta = nonHeap.getUsed();
+        long maxMeta = nonHeap.getMax();
+
+        return "File Scanner (heap: " + SizeFormat.format(usedHeap) + "/" + SizeFormat.format(maxHeap)
+                + " meta: " + SizeFormat.format(usedMeta)
+                + (maxMeta >= 0 ? "/" + SizeFormat.format(maxMeta) : "")
+                + ") \u2014 Disk Space Analyzer";
     }
 
     private void addToHistory(Path path) {

@@ -2,6 +2,7 @@ module by.snql.filescanner {
     requires javafx.controls;
     requires javafx.fxml;
     requires java.desktop;
+    requires java.management;
     requires java.logging;
     requires com.google.gson;
     requires org.apache.pdfbox;

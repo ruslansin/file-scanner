@@ -1,35 +1,31 @@
 {
   "windows": [
-    { "name": "Windows Update Cache",      "path": "%WINDIR%\\SoftwareDistribution\\Download", "description": "Cached Windows Update files" },
-    { "name": "System Temp",                "path": "%WINDIR%\\Temp",                            "description": "Temporary system files" },
-    { "name": "User Temp",                  "path": "%TEMP%",                                    "description": "User temporary files" },
-    { "name": "Prefetch",                   "path": "%WINDIR%\\Prefetch",                        "description": "Application startup cache" },
-    { "name": "Installer Cache",            "path": "%WINDIR%\\Installer",                       "description": "MSI/installer orphans" },
-    { "name": "Delivery Optimization",      "path": "%WINDIR%\\DeliveryOptimization",            "description": "P2P update sharing cache" },
-    { "name": "CBS Logs",                   "path": "%WINDIR%\\Logs\\CBS",                       "description": "Component servicing logs" },
+    { "name": "Windows Update Cache",      "path": "%WINDIR%\\SoftwareDistribution\\Download", "description": "Cached Windows Update files. Safe — Windows re-downloads what it needs." },
+    { "name": "System Temp",                "path": "%WINDIR%\\Temp",                            "description": "Temporary system files", "contentsOnly": true },
+    { "name": "User Temp",                  "path": "%TEMP%",                                    "description": "User temporary files", "contentsOnly": true, "daysOld": 1 },
+    { "name": "Delivery Optimization",      "path": "%WINDIR%\\DeliveryOptimization",            "description": "P2P update sharing cache", "contentsOnly": true },
+    { "name": "CBS Logs",                   "path": "%WINDIR%\\Logs\\CBS",                       "description": "Component servicing logs", "contentsOnly": true },
     { "name": "Thumbnail Cache",            "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer\\thumbcache_*.db", "description": "Thumbnail cache files", "filesOnly": true },
-    { "name": "IE/Edge Cache",              "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",    "description": "Internet Explorer / Edge cache" },
-    { "name": "Recycle Bin (C:)",           "path": "C:\\$Recycle.Bin",                          "description": "Deleted files on C:" },
-    { "name": "Recycle Bin (D:)",           "path": "D:\\$Recycle.Bin",                          "description": "Deleted files on D:" }
+    { "name": "IE/Edge Cache",              "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache",    "description": "Internet Explorer / Edge cache", "contentsOnly": true }
   ],
 
   "linux": [
-    { "name": "Systemd Journal",            "path": "/var/log/journal",                          "description": "Systemd journal logs" },
-    { "name": "APT Cache",                  "path": "/var/cache/apt/archives",                   "description": "Downloaded APT packages" },
-    { "name": "Snap Cache",                 "path": "/var/lib/snapd/cache",                      "description": "Snap package cache" },
-    { "name": "Old /tmp files",             "path": "/tmp",                                      "description": "Temporary files", "daysOld": 1 },
-    { "name": "Trash",                      "path": "$HOME/.local/share/Trash",                  "description": "User trash" },
-    { "name": "User Cache",                 "path": "$XDG_CACHE_HOME",                           "description": "XDG cache directory" },
-    { "name": "Journal Logs",               "path": "/var/log",                                  "description": "System log files", "extension": ".log" }
+    { "name": "Systemd Journal",            "path": "/var/log/journal",                          "description": "Systemd journal logs", "contentsOnly": true, "risk": "high" },
+    { "name": "APT Cache",                  "path": "/var/cache/apt/archives",                   "description": "Downloaded APT packages", "contentsOnly": true },
+    { "name": "Snap Cache",                 "path": "/var/lib/snapd/cache",                      "description": "Snap package cache", "contentsOnly": true },
+    { "name": "Old /tmp files",             "path": "/tmp",                                      "description": "Files in /tmp older than 3 days only", "contentsOnly": true, "daysOld": 3, "risk": "high" },
+    { "name": "Trash",                      "path": "$HOME/.local/share/Trash",                  "description": "User trash", "contentsOnly": true },
+    { "name": "User Cache",                 "path": "$XDG_CACHE_HOME",                           "description": "XDG cache directory", "contentsOnly": true },
+    { "name": "Log files (*.log)",          "path": "/var/log",                                  "description": "Only *.log files under /var/log — other log formats are left untouched", "extension": ".log", "risk": "high" }
   ],
 
   "macos": [
-    { "name": "User Caches",                "path": "$HOME/Library/Caches",                      "description": "Application caches" },
-    { "name": "User Logs",                  "path": "$HOME/Library/Logs",                        "description": "Application logs" },
-    { "name": "System Caches",              "path": "/Library/Caches",                           "description": "System caches" },
-    { "name": "System Logs",                "path": "/Library/Logs",                             "description": "System logs" },
-    { "name": "Trash",                      "path": "$HOME/.Trash",                              "description": "User trash" },
-    { "name": "VS Code Cache",              "path": "$HOME/Library/Application Support/Code/Cache", "description": "VS Code cache" },
+    { "name": "User Caches",                "path": "$HOME/Library/Caches",                      "description": "Application caches", "contentsOnly": true },
+    { "name": "User Logs",                  "path": "$HOME/Library/Logs",                        "description": "Application logs", "contentsOnly": true },
+    { "name": "System Caches",              "path": "/Library/Caches",                           "description": "System caches", "contentsOnly": true, "risk": "high" },
+    { "name": "System Logs",                "path": "/Library/Logs",                             "description": "System logs", "contentsOnly": true, "risk": "high" },
+    { "name": "Trash",                      "path": "$HOME/.Trash",                              "description": "User trash", "contentsOnly": true },
+    { "name": "VS Code Cache",              "path": "$HOME/Library/Application Support/Code/Cache", "description": "VS Code cache", "contentsOnly": true },
     { "name": "Xcode DerivedData",          "path": "$HOME/Library/Developer/Xcode/DerivedData", "description": "Xcode build artifacts" }
   ],
 
@@ -45,7 +41,7 @@
     { "name": "Composer Cache",             "path": "$HOME/.composer/cache",                     "description": "PHP Composer cache" },
     { "name": "RubyGems Cache",             "path": "$HOME/.gem/cache",                          "description": "Ruby gem cache" },
     { "name": "Docker BuildKit",            "path": "$HOME/.docker/buildkit",                    "description": "Docker BuildKit cache" },
-    { "name": "Docker Cleanup",             "path": "$HOME/.docker",                            "description": "Remove unused Docker data",                        "customCommand": "docker system prune -a -f --volumes 2>/dev/null || echo 'docker not running'" },
+    { "name": "Docker Cleanup",             "path": "$HOME/.docker",                            "description": "Remove unused Docker data (images, containers, volumes not in use)", "customCommand": "docker system prune -a -f --volumes 2>/dev/null || echo 'docker not running'", "risk": "high" },
     { "name": "Docker Images (native)",     "linuxPath": "/var/lib/docker/overlay2",                "description": "Docker image layers — run: docker system prune -a" },
     { "name": "Docker Volumes (native)",    "linuxPath": "/var/lib/docker/volumes",                 "description": "Docker named volumes — run: docker volume prune" },
     { "name": "Docker Temp (native)",       "linuxPath": "/var/lib/docker/tmp",                     "description": "Docker temporary files" },

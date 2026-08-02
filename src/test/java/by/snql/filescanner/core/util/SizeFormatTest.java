@@ -1,4 +1,4 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.util;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -6,10 +6,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Locale;
+
 import static org.junit.jupiter.api.Assertions.*;
 
-@DisplayName("MainWindow.formatSize")
-class FormatSizeTest {
+@DisplayName("SizeFormat")
+class SizeFormatTest {
 
     @Nested
     @DisplayName("zero and negative")
@@ -18,14 +20,14 @@ class FormatSizeTest {
         @Test
         @DisplayName("returns 0 B for zero")
         void returnsZeroBForZero() {
-            assertEquals("0 B", MainWindow.formatSize(0));
+            assertEquals("0 B", SizeFormat.format(0));
         }
 
         @Test
         @DisplayName("returns 0 B for negative")
         void returnsZeroBForNegative() {
-            assertEquals("0 B", MainWindow.formatSize(-1));
-            assertEquals("0 B", MainWindow.formatSize(-1000));
+            assertEquals("0 B", SizeFormat.format(-1));
+            assertEquals("0 B", SizeFormat.format(-1000));
         }
     }
 
@@ -36,9 +38,9 @@ class FormatSizeTest {
         @Test
         @DisplayName("formats single bytes")
         void formatsSingleBytes() {
-            assertEquals("1.0 B", MainWindow.formatSize(1));
-            assertEquals("512.0 B", MainWindow.formatSize(512));
-            assertEquals("1023.0 B", MainWindow.formatSize(1023));
+            assertEquals("1.0 B", SizeFormat.format(1));
+            assertEquals("512.0 B", SizeFormat.format(512));
+            assertEquals("1023.0 B", SizeFormat.format(1023));
         }
     }
 
@@ -49,8 +51,8 @@ class FormatSizeTest {
         @Test
         @DisplayName("formats KB range")
         void formatsKbRange() {
-            assertTrue(MainWindow.formatSize(1024).endsWith("KB"));
-            assertTrue(MainWindow.formatSize(1024 * 512).endsWith("KB"));
+            assertTrue(SizeFormat.format(1024).endsWith("KB"));
+            assertTrue(SizeFormat.format(1024 * 512).endsWith("KB"));
         }
     }
 
@@ -61,7 +63,7 @@ class FormatSizeTest {
         @Test
         @DisplayName("formats MB range")
         void formatsMbRange() {
-            assertTrue(MainWindow.formatSize(1024 * 1024).endsWith("MB"));
+            assertTrue(SizeFormat.format(1024 * 1024).endsWith("MB"));
         }
     }
 
@@ -72,7 +74,7 @@ class FormatSizeTest {
         @Test
         @DisplayName("formats GB range")
         void formatsGbRange() {
-            assertTrue(MainWindow.formatSize(1024L * 1024 * 1024).endsWith("GB"));
+            assertTrue(SizeFormat.format(1024L * 1024 * 1024).endsWith("GB"));
         }
     }
 
@@ -83,7 +85,24 @@ class FormatSizeTest {
         @Test
         @DisplayName("formats TB range")
         void formatsTbRange() {
-            assertTrue(MainWindow.formatSize(1024L * 1024 * 1024 * 1024).endsWith("TB"));
+            assertTrue(SizeFormat.format(1024L * 1024 * 1024 * 1024).endsWith("TB"));
+        }
+    }
+
+    @Nested
+    @DisplayName("locale independence")
+    class LocaleIndependence {
+
+        @Test
+        @DisplayName("always uses a dot decimal separator regardless of default locale")
+        void alwaysUsesDotSeparator() {
+            var original = Locale.getDefault();
+            try {
+                Locale.setDefault(Locale.GERMANY); // uses comma as decimal separator
+                assertEquals("1.5 KB", SizeFormat.format(1536));
+            } finally {
+                Locale.setDefault(original);
+            }
         }
     }
 
@@ -92,17 +111,16 @@ class FormatSizeTest {
     class Monotonic {
 
         @Test
-        @DisplayName("larger values never produce smaller formatted output")
-        void largerValuesProduceLargerFormats() {
+        @DisplayName("formatting never throws and never returns blank for positive sizes")
+        void neverBlank() {
             long[] sizes = {1, 10, 100, 1023, 1024, 2048, 10_000, 100_000,
                     1024L * 1024, 1024L * 1024 * 10, 1024L * 1024 * 1024,
                     1024L * 1024 * 1024 * 100, 1024L * 1024 * 1024 * 1024};
 
-            String prev = MainWindow.formatSize(sizes[0]);
-            for (int i = 1; i < sizes.length; i++) {
-                String current = MainWindow.formatSize(sizes[i]);
-                assertNotNull(current);
-                assertFalse(current.isEmpty());
+            for (long size : sizes) {
+                String formatted = SizeFormat.format(size);
+                assertNotNull(formatted);
+                assertFalse(formatted.isEmpty());
             }
         }
     }
@@ -118,6 +136,6 @@ class FormatSizeTest {
             "1073741824, 1.0 GB",
     })
     void formatsKnownValues(long bytes, String expected) {
-        assertEquals(expected, MainWindow.formatSize(bytes));
+        assertEquals(expected, SizeFormat.format(bytes));
     }
 }

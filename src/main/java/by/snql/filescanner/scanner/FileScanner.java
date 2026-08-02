@@ -1,35 +1,49 @@
 package by.snql.filescanner.scanner;
 
+import by.snql.filescanner.core.project.ProjectType;
 import by.snql.filescanner.model.FileNode;
-import by.snql.filescanner.ui.ProjectType;
-import by.snql.filescanner.ui.Settings;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.*;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+/**
+ * Recursively walks a directory tree on virtual threads, building a {@link FileNode} tree.
+ * Each call to {@link #scan} runs in its own isolated {@link Session} so that concurrent
+ * or repeated scans on the same {@code FileScanner} instance never share mutable state.
+ */
 public class FileScanner {
 
-    public record ScanProgress(double ratio, long filesDiscovered, long filesProcessed, long totalSizeSoFar) {}
-
-    private volatile boolean cancelled;
-    private boolean includeHidden = true;
-    private final AtomicLong runningSize = new AtomicLong();
-    private Consumer<FileNode> realtimeCallback;
-    private long lastRealtime;
-    private FileNode rootNode;
-
-    public void cancel() {
-        cancelled = true;
+    /** Scan behaviour flags. Immutable — replace via the setters, never mutate. */
+    public record ScanOptions(boolean includeHidden, boolean detectBuildArtifacts) {
+        public static ScanOptions defaults() {
+            return new ScanOptions(true, true);
+        }
     }
 
+    private volatile ScanOptions options = ScanOptions.defaults();
+    private volatile Session currentSession;
+
     public void setIncludeHidden(boolean includeHidden) {
-        this.includeHidden = includeHidden;
+        options = new ScanOptions(includeHidden, options.detectBuildArtifacts());
+    }
+
+    public void setDetectBuildArtifacts(boolean detect) {
+        options = new ScanOptions(options.includeHidden(), detect);
+    }
+
+    /** Cancels the most recently started scan on this instance, if still running. */
+    public void cancel() {
+        var session = currentSession;
+        if (session != null) session.cancelled = true;
     }
 
     public CompletableFuture<FileNode> scan(Path root, Consumer<Double> progressCallback) {
@@ -37,24 +51,22 @@ public class FileScanner {
     }
 
     public CompletableFuture<FileNode> scan(Path root, Consumer<Double> progressCallback,
-                                              Consumer<FileNode> realtimeCb) {
-        this.realtimeCallback = realtimeCb;
-        this.lastRealtime = 0;
-        this.rootNode = null;
-        cancelled = false;
-        runningSize.set(0);
+                                             Consumer<FileNode> realtimeCb) {
+        var session = new Session(options, realtimeCb);
+        currentSession = session;
+
         return CompletableFuture.supplyAsync(() -> {
             try {
                 if (!Files.exists(root)) return null;
 
                 var discovered = new AtomicLong(1);
                 var processed = new AtomicLong(0);
-                var inodeMap = new HashMap<Object, Path>();
 
-                rootNode = createDirNode(root, discovered, processed);
-                scanChildren(root, rootNode, discovered, processed, progressCallback, inodeMap);
+                var rootNode = createDirNode(session, root, discovered, processed);
+                session.rootNode = rootNode;
+                scanChildren(session, root, rootNode, discovered, processed, progressCallback);
 
-                if (cancelled) return null;
+                if (session.cancelled) return null;
                 rootNode.sortChildren();
                 return rootNode;
             } catch (IOException e) {
@@ -63,14 +75,29 @@ public class FileScanner {
         }, r -> Thread.ofVirtual().start(r));
     }
 
-    private FileNode createDirNode(Path path, AtomicLong discovered, AtomicLong processed)
+    private static final class Session {
+        final ScanOptions options;
+        final Consumer<FileNode> realtimeCallback;
+        final Map<Object, Path> inodeMap = new HashMap<>();
+        final Set<Object> visitedDirs = new HashSet<>();
+        volatile boolean cancelled;
+        volatile FileNode rootNode;
+        long lastRealtimeEmit;
+
+        Session(ScanOptions options, Consumer<FileNode> realtimeCallback) {
+            this.options = options;
+            this.realtimeCallback = realtimeCallback;
+        }
+    }
+
+    private FileNode createDirNode(Session session, Path path, AtomicLong discovered, AtomicLong processed)
             throws IOException {
         processed.incrementAndGet();
         var fileName = path.getFileName() != null
                 ? path.getFileName().toString() : path.toString();
         var node = new FileNode(path, fileName, true, 0);
         node.setLastModified(safeLastModified(path));
-        if (Settings.get().projectScanEnabled && ProjectType.isArtifactName(fileName)) {
+        if (session.options.detectBuildArtifacts() && ProjectType.isArtifactName(fileName)) {
             var parentType = ProjectType.detect(path.getParent());
             if (parentType.isPresent() && parentType.get().artifacts().contains(fileName)) {
                 node.setBuildArtifact(true);
@@ -79,36 +106,35 @@ public class FileScanner {
         return node;
     }
 
-    private void scanChildren(Path parentPath, FileNode parentNode,
+    private void scanChildren(Session session, Path parentPath, FileNode parentNode,
                                AtomicLong discovered, AtomicLong processed,
-                               Consumer<Double> progressCallback,
-                               Map<Object, Path> inodeMap) throws IOException {
-        if (cancelled) return;
+                               Consumer<Double> progressCallback) throws IOException {
+        if (session.cancelled) return;
 
         try (var stream = Files.list(parentPath)) {
             var entries = stream.toList();
             discovered.addAndGet(entries.size());
 
             for (var entry : entries) {
-                if (cancelled) break;
-                if (!includeHidden && isHidden(entry)) {
+                if (session.cancelled) break;
+                if (!session.options.includeHidden() && isHidden(entry)) {
                     discovered.decrementAndGet();
                     continue;
                 }
 
-                var child = processEntry(entry, discovered, processed, progressCallback, inodeMap);
+                var child = processEntry(session, entry, discovered, processed, progressCallback);
                 if (child != null) {
                     parentNode.addChild(child);
-                    emitIfTime();
+                    emitIfTime(session);
                 }
             }
         } catch (IOException ignored) {
+            // Permission-denied or similar — skip this directory's contents.
         }
     }
 
-    private FileNode processEntry(Path path, AtomicLong discovered, AtomicLong processed,
-                                   Consumer<Double> progressCallback,
-                                   Map<Object, Path> inodeMap) throws IOException {
+    private FileNode processEntry(Session session, Path path, AtomicLong discovered, AtomicLong processed,
+                                   Consumer<Double> progressCallback) throws IOException {
         processed.incrementAndGet();
         long proc = processed.get();
         long disc = discovered.get();
@@ -116,51 +142,53 @@ public class FileScanner {
             progressCallback.accept(Math.min(1.0, (double) proc / Math.max(disc, 1)));
         }
 
-        if (!Files.isDirectory(path)) {
+        boolean symlink = Files.isSymbolicLink(path);
+        // Never follow symlinks into directories: avoids infinite cycles and double-counting.
+        boolean isDir = !symlink && Files.isDirectory(path);
+
+        if (!isDir) {
             var fileName = path.getFileName() != null
                     ? path.getFileName().toString() : path.toString();
-            long size = safeFileSize(path);
+            long size = symlink ? 0 : safeFileSize(path);
             var node = new FileNode(path, fileName, false, size);
             node.setLastModified(safeLastModified(path));
-            detectLinks(path, node, inodeMap);
-            runningSize.addAndGet(size);
+            if (symlink) {
+                node.setSymlink(true);
+            } else {
+                detectHardlink(path, node, session.inodeMap);
+            }
             return node;
         }
 
-        var dirNode = createDirNode(path, discovered, processed);
-        scanChildren(path, dirNode, discovered, processed, progressCallback, inodeMap);
-        if (cancelled) return null;
+        // Guard against directory cycles reachable via junctions / bind mounts.
+        Object dirKey = dirKey(path);
+        if (dirKey != null && !session.visitedDirs.add(dirKey)) {
+            var fileName = path.getFileName() != null ? path.getFileName().toString() : path.toString();
+            var node = new FileNode(path, fileName, true, 0);
+            node.setHardlinkReference(true);
+            return node;
+        }
+
+        var dirNode = createDirNode(session, path, discovered, processed);
+        scanChildren(session, path, dirNode, discovered, processed, progressCallback);
+        if (session.cancelled) return null;
         dirNode.sortChildren();
         return dirNode;
     }
 
-    private void emitIfTime() {
+    private void emitIfTime(Session session) {
         long now = System.currentTimeMillis();
-        if (realtimeCallback != null && rootNode != null && now - lastRealtime >= 300) {
-            lastRealtime = now;
-            realtimeCallback.accept(shallowCopy(rootNode));
+        if (session.realtimeCallback != null && session.rootNode != null
+                && now - session.lastRealtimeEmit >= 300) {
+            session.lastRealtimeEmit = now;
+            // Hand off a snapshot copy, not the live tree — the UI thread will read it
+            // while this scan thread keeps mutating the real tree concurrently.
+            session.realtimeCallback.accept(FileNode.copyOf(session.rootNode));
         }
     }
 
-    private static FileNode shallowCopy(FileNode node) {
-        var copy = new FileNode(node.getPath(), node.getName(), node.isDirectory(), node.getSize());
-        if (node.isBuildArtifact()) copy.setBuildArtifact(true);
-        if (node.isSymlink()) copy.setSymlink(true);
-        if (node.isHardlinkReference()) copy.setHardlinkReference(true);
-        copy.setLastModified(node.getLastModified());
-        for (var child : node.getChildren()) {
-            copy.addChild(shallowCopy(child));
-        }
-        return copy;
-    }
-
-    private static void detectLinks(Path path, FileNode node, Map<Object, Path> inodeMap) {
+    private static void detectHardlink(Path path, FileNode node, Map<Object, Path> inodeMap) {
         try {
-            if (Files.isSymbolicLink(path)) {
-                node.setSymlink(true);
-                node.setSize(0);
-                return;
-            }
             var attr = Files.readAttributes(path, BasicFileAttributes.class);
             Object key = attr.fileKey();
             if (key != null) {
@@ -172,6 +200,14 @@ public class FileScanner {
                 }
             }
         } catch (IOException ignored) {
+        }
+    }
+
+    private static Object dirKey(Path path) {
+        try {
+            return Files.readAttributes(path, BasicFileAttributes.class).fileKey();
+        } catch (IOException e) {
+            return null;
         }
     }
 

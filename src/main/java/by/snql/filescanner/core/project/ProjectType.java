@@ -1,9 +1,12 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.project;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 public enum ProjectType {
 
@@ -34,11 +37,13 @@ public enum ProjectType {
         @Override
         boolean matches(Path dir) {
             try (var s = Files.list(dir)) {
-                return s.anyMatch(p -> {
-                    String n = p.getFileName().toString().toLowerCase();
-                    return n.endsWith(".csproj") || n.endsWith(".sln") || n.endsWith(".vbproj");
-                });
+                return s.anyMatch(p -> matchesDotnetFile(p.getFileName().toString()));
             } catch (Exception e) { return false; }
+        }
+
+        @Override
+        boolean matches(Set<String> namesInDir) {
+            return namesInDir.stream().anyMatch(ProjectType::matchesDotnetFile);
         }
     },
     PHP("PHP", "composer.json",
@@ -66,9 +71,34 @@ public enum ProjectType {
         return Files.exists(dir.resolve(configFile));
     }
 
+    /** Faster variant used when the directory listing is already available (avoids a stat per candidate type). */
+    boolean matches(Set<String> namesInDir) {
+        return configFile != null && namesInDir.contains(configFile);
+    }
+
+    private static boolean matchesDotnetFile(String name) {
+        String n = name.toLowerCase(Locale.ROOT);
+        return n.endsWith(".csproj") || n.endsWith(".sln") || n.endsWith(".vbproj");
+    }
+
+    /**
+     * Detects the project type of a single directory by its own marker file.
+     * Does not look at ancestors. One {@code Files.exists} (or listing) call per
+     * candidate type — prefer {@link #detect(Set)} when you already have the
+     * directory's file listing (e.g. while recursively walking a tree).
+     */
     public static Optional<ProjectType> detect(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) return Optional.empty();
         for (var type : values()) {
             if (type.matches(dir)) return Optional.of(type);
+        }
+        return Optional.empty();
+    }
+
+    /** Detects the project type from an already-obtained set of file/dir names within a directory. */
+    public static Optional<ProjectType> detect(Set<String> namesInDir) {
+        for (var type : values()) {
+            if (type.matches(namesInDir)) return Optional.of(type);
         }
         return Optional.empty();
     }

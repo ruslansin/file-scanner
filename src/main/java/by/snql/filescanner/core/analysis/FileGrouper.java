@@ -1,10 +1,9 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.analysis;
 
 import by.snql.filescanner.model.FileNode;
 
 import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileOwnerAttributeView;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -18,31 +17,10 @@ public final class FileGrouper {
     public static List<Group> byFileType(FileNode root) {
         var map = new LinkedHashMap<String, List<FileNode>>();
         for (var f : FileAnalysis.flattenFiles(root)) {
-            String cat = categoryName(f.getName());
+            String cat = FileCategory.forFile(f.getName()).name();
             map.computeIfAbsent(cat, k -> new ArrayList<>()).add(f);
         }
         return toGroups(map);
-    }
-
-    private static String categoryName(String name) {
-        String ext = ext(name);
-        return switch (ext) {
-            case "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "ico", "tiff", "psd", "raw", "heic" -> "Image";
-            case "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp" -> "Video";
-            case "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus" -> "Audio";
-            case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods" -> "Document";
-            case "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "jar", "war", "iso", "dmg" -> "Archive";
-            case "java", "py", "js", "ts", "jsx", "tsx", "c", "cpp", "h", "hpp", "cs", "go", "rs", "rb", "php",
-                 "swift", "kt", "scala", "lua", "sh", "bash", "sql", "html", "css", "xml", "json" -> "Code";
-            case "exe", "dll", "so", "dylib", "bin", "app", "msi" -> "Executable";
-            case "ttf", "otf", "woff", "woff2" -> "Font";
-            default -> "Other";
-        };
-    }
-
-    private static String ext(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "";
     }
 
     public static List<Group> byAge(FileNode root) {
@@ -57,8 +35,8 @@ public final class FileGrouper {
         map.put("Unknown", new ArrayList<>());
 
         for (var f : FileAnalysis.flattenFiles(root)) {
-            long lastMod = lastModified(f);
-            if (lastMod == 0) {
+            long lastMod = f.getLastModified();
+            if (lastMod <= 0) {
                 map.get("Unknown").add(f);
                 continue;
             }
@@ -73,6 +51,10 @@ public final class FileGrouper {
         return toGroups(map);
     }
 
+    /**
+     * Groups by file owner. This performs one filesystem attribute lookup per file
+     * and is I/O-bound — callers must invoke it off the UI thread.
+     */
     public static List<Group> byOwner(FileNode root) {
         var map = new LinkedHashMap<String, List<FileNode>>();
         for (var f : FileAnalysis.flattenFiles(root)) {
@@ -93,19 +75,12 @@ public final class FileGrouper {
                 .collect(Collectors.toList());
     }
 
-    private static long lastModified(FileNode file) {
-        try {
-            return Files.readAttributes(file.getPath(), BasicFileAttributes.class).lastModifiedTime().toMillis();
-        } catch (IOException e) {
-            return 0;
-        }
-    }
-
     private static String owner(FileNode file) {
         try {
             var view = Files.getFileAttributeView(file.getPath(), FileOwnerAttributeView.class);
             if (view != null && view.getOwner() != null) return view.getOwner().getName();
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+        }
         return "unknown";
     }
 }

@@ -42,3 +42,7 @@
     -fx-background-color: #bdc3c7;
     -fx-padding: 0 2px;
 }
+
+.status-bar {
+    -fx-background-color: #f0f0f0;
+}

@@ -1,5 +1,11 @@
 package by.snql.filescanner.ui;
 
+import by.snql.filescanner.config.Settings;
+import by.snql.filescanner.config.CacheManager;
+import by.snql.filescanner.core.cleanup.DeletionService;
+import by.snql.filescanner.core.export.ExportUtils;
+import by.snql.filescanner.core.export.PdfReport;
+import by.snql.filescanner.core.util.SizeFormat;
 import by.snql.filescanner.model.FileNode;
 import by.snql.filescanner.scanner.FileScanner;
 import javafx.application.Platform;
@@ -15,15 +21,14 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import java.awt.Desktop;
-import java.io.File;
 import java.io.IOException;
-import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.stream.Collectors;
 
 public class MainWindow {
 
@@ -32,6 +37,8 @@ public class MainWindow {
     private final TreemapChart treemapChart;
     private final RingsChart ringsChart;
     private final StackPane chartStack;
+    private final HBox breadcrumbBar;
+    private final Button upButton;
     private final TreeView<FileNode> treeView;
     private final ProgressBar progressBar;
     private final Label statusLabel;
@@ -56,10 +63,11 @@ public class MainWindow {
     private FileNode currentRoot;
     private Path scannedRootPath;
     private ChartView currentView = ChartView.TREEMAP;
-    private final java.util.List<String> history = new ArrayList<>();
+    private final List<String> history = new ArrayList<>();
     private boolean updatingHistory;
 
-    private static final String[] SIZE_UNITS = {"B", "KB", "MB", "GB", "TB"};
+    /** Drill-down stack for the treemap/rings views: index 0 is the scan root. */
+    private final List<FileNode> viewStack = new ArrayList<>();
 
     private enum ChartView { TREEMAP, RINGS }
 
@@ -70,8 +78,17 @@ public class MainWindow {
         this.ringsChart = new RingsChart();
         this.bottomTabs = new BottomTabs();
 
+        applyScanSettings();
+
         chartStack = new StackPane(treemapChart, ringsChart);
         ringsChart.setVisible(false);
+
+        upButton = new Button("\u2191 Up");
+        upButton.setDisable(true);
+        upButton.setOnAction(e -> navigateUp());
+        breadcrumbBar = new HBox(6);
+        breadcrumbBar.setPadding(new Insets(4, 8, 4, 8));
+        breadcrumbBar.setAlignment(Pos.CENTER_LEFT);
 
         treemapBtn = new ToggleButton("Treemap");
         ringsBtn = new ToggleButton("Rings");
@@ -92,11 +109,10 @@ public class MainWindow {
 
         hiddenFilesCheck = new CheckBox("Show hidden");
         hiddenFilesCheck.setSelected(Settings.get().scanHidden);
-        scanner.setIncludeHidden(Settings.get().scanHidden);
         hiddenFilesCheck.setOnAction(e -> {
             Settings.get().scanHidden = hiddenFilesCheck.isSelected();
             Settings.get().save();
-            scanner.setIncludeHidden(hiddenFilesCheck.isSelected());
+            applyScanSettings();
             if (scannedRootPath != null) rescanCurrentRoot();
         });
 
@@ -113,7 +129,8 @@ public class MainWindow {
         searchField.setPrefWidth(200);
         searchField.textProperty().addListener((obs, old, val) -> applySearchFilter());
 
-        historyCombo = new ComboBox<>();
+        history.addAll(Settings.get().recentPaths);
+        historyCombo = new ComboBox<>(FXCollections.observableArrayList(history));
         historyCombo.setPromptText("History");
         historyCombo.setPrefWidth(150);
         historyCombo.setOnAction(e -> {
@@ -130,7 +147,7 @@ public class MainWindow {
         sortCombo.setPrefWidth(130);
         sortCombo.setOnAction(e -> {
             Settings.get().defaultSort = sortCombo.getValue()
-                    .replace("Sort by ", "").toLowerCase();
+                    .replace("Sort by ", "").toLowerCase(Locale.ROOT);
             Settings.get().save();
             if (currentRoot != null) {
                 applySort(currentRoot);
@@ -138,7 +155,7 @@ public class MainWindow {
             }
         });
 
-        settingsButton = new Button("⚙");
+        settingsButton = new Button("\u2699");
         settingsButton.setStyle("-fx-font-size: 14px; -fx-padding: 4 10;");
         settingsButton.setOnAction(e -> showSettingsDialog());
 
@@ -158,6 +175,8 @@ public class MainWindow {
         treemapChart.setOnNodeClicked(this::onChartNodeClicked);
         ringsChart.setOnNodeClicked(this::onChartNodeClicked);
 
+        bottomTabs.setOnStatus(statusLabel::setText);
+
         var toolbar = new HBox(6, scanButton, cancelButton, homeButton, refreshButton,
                 new Separator(), hiddenFilesCheck, darkModeCheck,
                 new Separator(), sortCombo,
@@ -169,15 +188,18 @@ public class MainWindow {
 
         var statusBar = new HBox(10, statusLabel, countLabel, sizeLabel, diskLabel);
         statusBar.setPadding(new Insets(5, 10, 5, 10));
-        statusBar.setStyle("-fx-background-color: #f0f0f0;");
+        statusBar.getStyleClass().add("status-bar");
         HBox.setHgrow(statusLabel, Priority.ALWAYS);
 
         treeView.setMinWidth(250);
         treeView.setPrefWidth(300);
 
+        var chartPane = new VBox(new HBox(6, upButton, breadcrumbBar), chartStack);
+        VBox.setVgrow(chartStack, Priority.ALWAYS);
+
         var mainSplit = new SplitPane();
         mainSplit.getItems().add(treeView);
-        mainSplit.getItems().add(chartStack);
+        mainSplit.getItems().add(chartPane);
         mainSplit.setDividerPositions(0.3);
 
         var bottomPane = bottomTabs.getPane();
@@ -192,11 +214,16 @@ public class MainWindow {
         scene.addEventHandler(KeyEvent.KEY_PRESSED, this::onKeyPressed);
         setupDragAndDrop(scene);
 
-        stage.setTitle("File Scanner — Disk Space Analyzer");
+        stage.setTitle("File Scanner \u2014 Disk Space Analyzer");
         stage.setScene(scene);
         stage.setMinWidth(800);
         stage.setMinHeight(600);
         applyTheme();
+    }
+
+    private void applyScanSettings() {
+        scanner.setIncludeHidden(Settings.get().scanHidden);
+        scanner.setDetectBuildArtifacts(Settings.get().projectScanEnabled);
     }
 
     private void setupDragAndDrop(Scene scene) {
@@ -219,15 +246,64 @@ public class MainWindow {
         currentView = view;
         treemapChart.setVisible(view == ChartView.TREEMAP);
         ringsChart.setVisible(view == ChartView.RINGS);
-        if (currentRoot != null) {
-            treemapChart.setRoot(currentRoot);
-            ringsChart.setRoot(currentRoot);
+        renderCurrentView();
+    }
+
+    // ── Treemap/Rings drill-down navigation ─────────────────────────────
+
+    private void resetView(FileNode node) {
+        viewStack.clear();
+        if (node != null) viewStack.add(node);
+        renderCurrentView();
+    }
+
+    private void pushView(FileNode node) {
+        viewStack.add(node);
+        renderCurrentView();
+    }
+
+    private void navigateUp() {
+        if (viewStack.size() > 1) {
+            viewStack.remove(viewStack.size() - 1);
+            renderCurrentView();
+        }
+    }
+
+    private void navigateTo(int index) {
+        if (index < 0 || index >= viewStack.size()) return;
+        while (viewStack.size() > index + 1) viewStack.remove(viewStack.size() - 1);
+        renderCurrentView();
+    }
+
+    private void renderCurrentView() {
+        if (viewStack.isEmpty()) {
+            upButton.setDisable(true);
+            breadcrumbBar.getChildren().clear();
+            return;
+        }
+        var top = viewStack.get(viewStack.size() - 1);
+        treemapChart.setRoot(top);
+        ringsChart.setRoot(top);
+        upButton.setDisable(viewStack.size() <= 1);
+        rebuildBreadcrumb();
+    }
+
+    private void rebuildBreadcrumb() {
+        breadcrumbBar.getChildren().clear();
+        for (int i = 0; i < viewStack.size(); i++) {
+            final int idx = i;
+            var name = viewStack.get(i).getName();
+            var link = new Hyperlink(name.isEmpty() ? "/" : name);
+            link.setOnAction(e -> navigateTo(idx));
+            breadcrumbBar.getChildren().add(link);
+            if (i < viewStack.size() - 1) {
+                breadcrumbBar.getChildren().add(new Label("\u203a"));
+            }
         }
     }
 
     private void onChartNodeClicked(FileNode node) {
-        if (currentView == ChartView.TREEMAP) treemapChart.setRoot(node);
-        else ringsChart.setRoot(node);
+        pushView(node);
         highlightInTree(node);
     }
 
@@ -252,8 +328,7 @@ public class MainWindow {
         if (text.isEmpty()) {
             if (currentRoot != null) {
                 populateTree(currentRoot);
-                treemapChart.setRoot(currentRoot);
-                ringsChart.setRoot(currentRoot);
+                resetView(currentRoot);
             }
             return;
         }
@@ -261,20 +336,19 @@ public class MainWindow {
         var filtered = filterTree(currentRoot, text);
         if (filtered != null) {
             populateTree(filtered);
-            treemapChart.setRoot(filtered);
-            ringsChart.setRoot(filtered);
+            resetView(filtered);
         }
     }
 
     private boolean matchesFilter(String name, String query) {
-        var n = name.toLowerCase();
+        var n = name.toLowerCase(Locale.ROOT);
         if (query.startsWith("regex:")) {
             try { return n.matches(".*" + query.substring(6) + ".*"); } catch (Exception e) { return n.contains(query.substring(6)); }
         }
         if (query.contains("*") || query.contains("?")) {
             return globMatch(n, query);
         }
-        return n.contains(query.toLowerCase());
+        return n.contains(query.toLowerCase(Locale.ROOT));
     }
 
     private static boolean globMatch(String name, String glob) {
@@ -287,10 +361,10 @@ public class MainWindow {
         for (int i = 0; i < glob.length(); i++) {
             char c = glob.charAt(i);
             switch (c) {
-                case '*': sb.append(".*"); break;
-                case '?': sb.append('.'); break;
-                case '.': sb.append("\\."); break;
-                default:  sb.append(Character.toLowerCase(c));
+                case '*' -> sb.append(".*");
+                case '?' -> sb.append('.');
+                case '.' -> sb.append("\\.");
+                default -> sb.append(Character.toLowerCase(c));
             }
         }
         sb.append("$");
@@ -300,7 +374,7 @@ public class MainWindow {
     private FileNode filterTree(FileNode node, String query) {
         if (matchesFilter(node.getName(), query)) return node;
 
-        var filteredChildren = new java.util.ArrayList<FileNode>();
+        var filteredChildren = new ArrayList<FileNode>();
         for (var child : node.getChildren()) {
             var filtered = filterTree(child, query);
             if (filtered != null) filteredChildren.add(filtered);
@@ -314,61 +388,38 @@ public class MainWindow {
         return null;
     }
 
-    private void deleteNodes(java.util.List<FileNode> nodes) {
+    private void deleteNodes(List<FileNode> nodes) {
         if (nodes.isEmpty()) return;
-        if (nodes.size() == 1) {
-            deleteSingle(nodes.get(0));
-            return;
-        }
 
         long totalSize = nodes.stream().mapToLong(FileNode::getSize).sum();
         var alert = new Alert(Alert.AlertType.CONFIRMATION);
         alert.setTitle("Confirm Deletion");
-        alert.setHeaderText("Delete " + nodes.size() + " items?");
-        alert.setContentText("Total size: " + formatSize(totalSize));
+        alert.setHeaderText("Delete " + nodes.size() + " item(s)?");
+        alert.setContentText("Total size: " + SizeFormat.format(totalSize) +
+                (Settings.get().moveToTrash ? "\n(moved to trash)" : "\n(PERMANENTLY deleted)"));
 
         if (alert.showAndWait().orElse(null) == ButtonType.OK) {
-            for (var node : nodes) {
-                if (node.getPath() == null) continue;
-                try { deleteRecursive(node.getPath()); } catch (IOException ignored) {}
-            }
-            statusLabel.setText("Deleted " + nodes.size() + " items");
+            var paths = nodes.stream().map(FileNode::getPath).filter(p -> p != null).toList();
+            var result = DeletionService.delete(paths, Settings.get().moveToTrash);
+            reportDeletionResult(result);
             rescanCurrentRoot();
         }
     }
 
-    private void deleteSingle(FileNode node) {
-        if (node.getPath() == null) return;
-
-        var alert = new Alert(Alert.AlertType.CONFIRMATION);
-        alert.setTitle("Confirm Deletion");
-        alert.setHeaderText("Delete " + (node.isDirectory() ? "folder" : "file") + "?");
-        alert.setContentText(node.getPath().toString() + "\n(" + formatSize(node.getSize()) + ")");
-
-        if (alert.showAndWait().orElse(null) == ButtonType.OK) {
-            try {
-                deleteRecursive(node.getPath());
-                statusLabel.setText("Deleted: " + node.getPath());
-                rescanCurrentRoot();
-            } catch (IOException ex) {
-                showError("Delete Error", "Could not delete", ex.getMessage());
-            }
+    private void reportDeletionResult(DeletionService.DeletionResult result) {
+        if (result.allSucceeded()) {
+            statusLabel.setText("Deleted " + result.deleted().size() + " item(s)");
+            return;
         }
-    }
-
-    private void deleteNode(FileNode node) {
-        deleteNodes(java.util.List.of(node));
-    }
-
-    private void deleteRecursive(Path path) throws IOException {
-        if (Files.isDirectory(path)) {
-            try (var stream = Files.walk(path)) {
-                stream.sorted(Comparator.reverseOrder())
-                        .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
-            }
-        } else {
-            Files.delete(path);
-        }
+        statusLabel.setText("Deleted " + result.deleted().size() + ", failed " + result.failureCount());
+        var alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle("Some items were not deleted");
+        alert.setHeaderText(result.deleted().size() + " deleted, " + result.failureCount() + " failed");
+        var details = result.errors().entrySet().stream()
+                .map(e -> e.getKey() + ": " + e.getValue())
+                .collect(Collectors.joining("\n"));
+        alert.setContentText(details);
+        alert.showAndWait();
     }
 
     private void chooseAndScan() {
@@ -389,6 +440,7 @@ public class MainWindow {
         treeView.setRoot(null);
         treemapChart.clear();
         ringsChart.clear();
+        viewStack.clear();
         bottomTabs.setRoot(null);
 
         var lastUpdate = new long[]{0};
@@ -396,9 +448,9 @@ public class MainWindow {
                         partial -> Platform.runLater(() -> {
                             partial.sortChildren();
                             updateTreeLive(partial);
-                            treemapChart.setRoot(partial);
-                            ringsChart.setRoot(partial);
-                            sizeLabel.setText(formatSize(partial.getSize()));
+                            if (viewStack.isEmpty()) resetView(partial); else viewStack.set(0, partial);
+                            renderCurrentView();
+                            sizeLabel.setText(SizeFormat.format(partial.getSize()));
                         }))
                 .thenAccept(root -> Platform.runLater(() -> {
                     progressBar.setProgress(1.0);
@@ -408,16 +460,15 @@ public class MainWindow {
                         currentRoot = root;
                         applySort(root);
                         statusLabel.setText("Scan complete: " + rootPath);
-                        sizeLabel.setText(formatSize(root.getSize()));
+                        sizeLabel.setText(SizeFormat.format(root.getSize()));
                         updateCounts(root);
                         updateDiskInfo(rootPath);
                         updateTreeLive(root);
-                        treemapChart.setRoot(root);
-                        ringsChart.setRoot(root);
+                        resetView(root);
                         bottomTabs.setRoot(root);
                         Settings.get().lastScannedPath = rootPath.toString();
                         Settings.get().save();
-                        new Thread(() -> CacheManager.saveLastScan(root)).start();
+                        Thread.ofVirtual().start(() -> CacheManager.saveLastScan(root));
                     }
                     progressBar.setVisible(false);
                     cancelButton.setVisible(false);
@@ -445,6 +496,9 @@ public class MainWindow {
         historyCombo.setItems(FXCollections.observableArrayList(history));
         historyCombo.setValue(s);
         updatingHistory = false;
+
+        Settings.get().recentPaths = new ArrayList<>(history);
+        Settings.get().save();
     }
 
     private void rescanCurrentRoot() {
@@ -465,26 +519,21 @@ public class MainWindow {
                         setText(null); setGraphic(null); setContextMenu(null); setTooltip(null);
                         setStyle("");
                     } else {
-                        var prefix = new java.lang.StringBuilder();
-                        if (node.isBuildArtifact()) prefix.append("🧹 ");
-                        if (node.isSymlink()) prefix.append("↗ ");
-                        else if (node.isHardlinkReference()) prefix.append("⫘ ");
-                        setText(prefix + node.getName() + "  (" + formatSize(node.getSize()) + ")");
+                        var prefix = new StringBuilder();
+                        if (node.isBuildArtifact()) prefix.append("\uD83E\uDDF9 ");
+                        if (node.isSymlink()) prefix.append("\u2197 ");
+                        else if (node.isHardlinkReference()) prefix.append("\u22D8 ");
+                        setText(prefix + node.getName() + "  (" + SizeFormat.format(node.getSize()) + ")");
                         setContextMenu(buildContextMenu(node));
-                        ttip.setText(node.getPath() + "\n" + formatSize(node.getSize()));
+                        ttip.setText(node.getPath() + "\n" + SizeFormat.format(node.getSize()));
                         setTooltip(ttip);
-                        if (node.isBuildArtifact()) {
-                            setStyle("-fx-text-fill: #e67e22; -fx-font-weight: bold;");
-                        } else {
-                            setStyle("");
-                        }
+                        setStyle(node.isBuildArtifact() ? "-fx-text-fill: #e67e22; -fx-font-weight: bold;" : "");
                     }
                 }
             };
             cell.setOnMouseClicked(e -> {
                 if (e.getClickCount() == 1 && !cell.isEmpty()) {
-                    treemapChart.setRoot(cell.getItem());
-                    ringsChart.setRoot(cell.getItem());
+                    resetView(cell.getItem());
                 }
             });
             return cell;
@@ -506,7 +555,7 @@ public class MainWindow {
         }
 
         var exportMenu = new Menu("Export");
-        for (var fmt : new String[]{"CSV", "JSON", "HTML"}) {
+        for (var fmt : new String[]{"CSV", "JSON", "HTML", "PDF"}) {
             var item = new MenuItem(fmt);
             item.setOnAction(e -> exportReport(fmt));
             exportMenu.getItems().add(item);
@@ -517,21 +566,13 @@ public class MainWindow {
 
         if (node.isBuildArtifact()) {
             var deleteBuildItem = new MenuItem("Delete Build Artifact");
-            deleteBuildItem.setOnAction(e -> {
-                try {
-                    deleteRecursive(node.getPath());
-                    statusLabel.setText("Deleted: " + node.getPath());
-                    rescanCurrentRoot();
-                } catch (IOException ex) {
-                    showError("Delete Error", "Could not delete", ex.getMessage());
-                }
-            });
+            deleteBuildItem.setOnAction(e -> deleteNodes(List.of(node)));
             menu.getItems().add(deleteBuildItem);
             menu.getItems().add(new SeparatorMenuItem());
         }
 
         var deleteItem = new MenuItem("Delete");
-        deleteItem.setOnAction(e -> deleteNode(node));
+        deleteItem.setOnAction(e -> deleteNodes(List.of(node)));
         menu.getItems().add(deleteItem);
 
         return menu;
@@ -541,18 +582,26 @@ public class MainWindow {
         if (currentRoot == null) return;
         var chooser = new FileChooser();
         chooser.setTitle("Export " + format + " Report");
-        chooser.setInitialFileName("file-scanner-report." + format.toLowerCase());
+        chooser.setInitialFileName("file-scanner-report." + format.toLowerCase(Locale.ROOT));
         chooser.getExtensionFilters().add(
-                new FileChooser.ExtensionFilter(format + " files", "*." + format.toLowerCase()));
+                new FileChooser.ExtensionFilter(format + " files", "*." + format.toLowerCase(Locale.ROOT)));
         var file = chooser.showSaveDialog(stage);
-        if (file != null) {
+        if (file == null) return;
+
+        var root = currentRoot;
+        statusLabel.setText("Exporting " + format + "...");
+        Thread.ofVirtual().start(() -> {
             try {
-                ExportUtils.export(currentRoot, file.toPath(), format.toLowerCase());
-                statusLabel.setText("Exported to " + file);
+                if ("PDF".equalsIgnoreCase(format)) {
+                    PdfReport.generate(root, file.toPath(), 100);
+                } else {
+                    ExportUtils.export(root, file.toPath(), format.toLowerCase(Locale.ROOT));
+                }
+                Platform.runLater(() -> statusLabel.setText("Exported to " + file));
             } catch (IOException ex) {
-                showError("Export Error", "Could not export", ex.getMessage());
+                Platform.runLater(() -> showError("Export Error", "Could not export", ex.getMessage()));
             }
-        }
+        });
     }
 
     private void openInFileManager(Path path) {
@@ -576,7 +625,7 @@ public class MainWindow {
     }
 
     private void updateCounts(FileNode root) {
-        var files = FileAnalysis.flattenFiles(root);
+        var files = by.snql.filescanner.core.analysis.FileAnalysis.flattenFiles(root);
         long fileCount = files.size();
         long dirCount = countDirs(root);
         countLabel.setText(fileCount + " files, " + dirCount + " dirs");
@@ -593,7 +642,7 @@ public class MainWindow {
             var store = Files.getFileStore(rootPath);
             long total = store.getTotalSpace();
             long free = store.getUsableSpace();
-            diskLabel.setText(formatSize(free) + " free of " + formatSize(total));
+            diskLabel.setText(SizeFormat.format(free) + " free of " + SizeFormat.format(total));
         } catch (IOException e) {
             diskLabel.setText("");
         }
@@ -605,8 +654,7 @@ public class MainWindow {
 
         Comparator<FileNode> comp = switch (selected) {
             case "Sort by Name" -> Comparator.comparing(FileNode::getName, String.CASE_INSENSITIVE_ORDER);
-            case "Sort by Date" -> Comparator.comparingLong(
-                    f -> { try { return Files.readAttributes(f.getPath(), BasicFileAttributes.class).lastModifiedTime().toMillis(); } catch (IOException e) { return 0; } });
+            case "Sort by Date" -> Comparator.comparingLong(FileNode::getLastModified);
             default -> Comparator.comparingLong(FileNode::getSize).reversed();
         };
         sortRecursive(root, comp);
@@ -633,71 +681,66 @@ public class MainWindow {
         }
     }
 
+    /**
+     * Merges live-scan updates into the existing {@link TreeItem} structure in place
+     * (so JavaFX doesn't lose expansion/selection state), matching by path rather than
+     * object identity, including both files and directories, and removing entries that
+     * no longer exist in the fresh tree.
+     */
     private void mergeChildren(TreeItem<FileNode> item, FileNode fresh) {
-        var existing = new java.util.LinkedHashMap<String, TreeItem<FileNode>>();
+        var existing = new java.util.LinkedHashMap<Path, TreeItem<FileNode>>();
         for (var child : item.getChildren()) {
-            if (child.getValue() != null) {
-                existing.put(child.getValue().getName(), child);
+            if (child.getValue() != null && child.getValue().getPath() != null) {
+                existing.put(child.getValue().getPath(), child);
             }
         }
 
+        item.getChildren().clear();
         for (var freshChild : fresh.getChildren()) {
-            if (!freshChild.isDirectory()) continue;
-            var ex = existing.remove(freshChild.getName());
+            var ex = existing.get(freshChild.getPath());
             if (ex != null) {
                 ex.setValue(freshChild);
-                mergeChildren(ex, freshChild);
+                if (freshChild.isDirectory()) mergeChildren(ex, freshChild);
+                item.getChildren().add(ex);
             } else {
                 var newItem = new TreeItem<>(freshChild);
+                if (freshChild.isDirectory()) {
+                    for (var grandChild : freshChild.getChildren()) {
+                        newItem.getChildren().add(new TreeItem<>(grandChild));
+                    }
+                }
                 item.getChildren().add(newItem);
             }
         }
     }
 
-    private TreeItem<FileNode> createLazyTreeItem(FileNode node) {
-        var item = new TreeItem<>(node);
-        if (node.isDirectory() && !node.getChildren().isEmpty()) {
-            item.getChildren().add(new TreeItem<>(new FileNode(null, "Loading...", false, 0)));
-            item.expandedProperty().addListener((obs, old, val) -> {
-                if (val && item.getChildren().size() == 1 &&
-                        "Loading...".equals(item.getChildren().get(0).getValue().getName())) {
-                    item.getChildren().clear();
-                    for (var child : node.getChildren()) {
-                        if (child.isDirectory()) {
-                            item.getChildren().add(createLazyTreeItem(child));
-                        }
-                    }
-                }
-            });
-        }
-        return item;
-    }
-
     private void highlightInTree(FileNode target) {
-        if (treeView.getRoot() == null) return;
-        expandAndSelect(treeView.getRoot(), target);
+        if (treeView.getRoot() == null || target == null || target.getPath() == null) return;
+        expandAndSelect(treeView.getRoot(), target.getPath());
     }
 
-    private boolean expandAndSelect(TreeItem<FileNode> item, FileNode target) {
-        if (item.getValue() == target) {
+    private boolean expandAndSelect(TreeItem<FileNode> item, Path targetPath) {
+        if (item.getValue() != null && targetPath.equals(item.getValue().getPath())) {
             treeView.getSelectionModel().select(item);
             treeView.scrollTo(treeView.getSelectionModel().getSelectedIndex());
             return true;
         }
-        item.setExpanded(true);
         for (var child : item.getChildren()) {
-            if (expandAndSelect(child, target)) return true;
+            if (targetPath.startsWith(child.getValue() != null && child.getValue().getPath() != null
+                    ? child.getValue().getPath() : Path.of(""))) {
+                item.setExpanded(true);
+                if (expandAndSelect(child, targetPath)) return true;
+            }
         }
-        item.setExpanded(false);
         return false;
     }
 
     private void applyTheme() {
-        var root = stage.getScene().getRoot();
+        var scene = stage.getScene();
+        if (scene == null) return;
+        scene.getStylesheets().removeIf(s -> s.endsWith("dark.css"));
         if (darkModeCheck.isSelected()) {
-            root.setStyle("-fx-base: #2b2b2b; -fx-background: #3c3f41; -fx-control-inner-background: #3c3f41; -fx-text-fill: #bbbbbb;");
-        } else {
-            root.setStyle("");
+            scene.getStylesheets().add(getClass().getResource("/styles/dark.css").toExternalForm());
         }
     }
 
@@ -708,14 +751,6 @@ public class MainWindow {
         alert.setContentText(msg != null ? msg : "");
         alert.showAndWait();
         statusLabel.setText(header + ": " + (msg != null ? msg : ""));
-    }
-
-    public static String formatSize(long bytes) {
-        if (bytes <= 0) return "0 B";
-        int unit = (int) (Math.log10(bytes) / Math.log10(1024));
-        unit = Math.min(unit, SIZE_UNITS.length - 1);
-        double value = bytes / Math.pow(1024, unit);
-        return String.format("%.1f %s", value, SIZE_UNITS[unit]);
     }
 
     private void showSettingsDialog() {
@@ -729,10 +764,18 @@ public class MainWindow {
         var darkCb = new CheckBox("Dark mode on startup");
         darkCb.setSelected(s.darkMode);
 
+        var trashCb = new CheckBox("Move deleted items to Trash/Recycle Bin (recommended)");
+        trashCb.setSelected(s.moveToTrash);
+        if (!DeletionService.isTrashSupported()) {
+            trashCb.setSelected(false);
+            trashCb.setDisable(true);
+            trashCb.setText(trashCb.getText() + " \u2014 not supported on this system");
+        }
+
         var sortCb = new ComboBox<String>(FXCollections.observableArrayList("size", "name", "date"));
         sortCb.setValue(s.defaultSort);
 
-        var form = new javafx.scene.layout.GridPane();
+        var form = new GridPane();
         form.setHgap(10);
         form.setVgap(10);
         form.setPadding(new Insets(15));
@@ -742,31 +785,33 @@ public class MainWindow {
         form.add(hiddenCb, 1, 1);
         form.add(new Label("Appearance:"), 0, 2);
         form.add(darkCb, 1, 2);
-        form.add(new Label("Default sort:"), 0, 3);
-        form.add(sortCb, 1, 3);
+        form.add(new Label("Deletion:"), 0, 3);
+        form.add(trashCb, 1, 3);
+        form.add(new Label("Default sort:"), 0, 4);
+        form.add(sortCb, 1, 4);
 
         var rootsLabel = new Label("Scan roots for projects (one per line):");
-        form.add(rootsLabel, 0, 4);
+        form.add(rootsLabel, 0, 5);
         var rootsArea = new TextArea(String.join("\n", s.scanRoots));
         rootsArea.setPrefRowCount(4);
         rootsArea.setPrefWidth(350);
-        form.add(rootsArea, 1, 4);
+        form.add(rootsArea, 1, 5);
 
         var projectEnabledCb = new CheckBox("Enable project scanning");
         projectEnabledCb.setSelected(s.projectScanEnabled);
-        form.add(projectEnabledCb, 0, 5, 2, 1);
+        form.add(projectEnabledCb, 0, 6, 2, 1);
 
         var depthLabel = new Label("Max scan depth:");
-        form.add(depthLabel, 0, 6);
+        form.add(depthLabel, 0, 7);
         var depthField = new TextField(String.valueOf(s.projectScanDepth));
         depthField.setPrefWidth(60);
-        form.add(depthField, 1, 6);
+        form.add(depthField, 1, 7);
 
         var note = new Label("Duplicate detection uses SHA-256. Disabled by default (slow on large scans).");
         note.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-        form.add(note, 0, 7, 2, 1);
+        form.add(note, 0, 8, 2, 1);
 
-        var dialog = new javafx.scene.control.Dialog<ButtonType>();
+        var dialog = new Dialog<ButtonType>();
         dialog.setTitle("Settings");
         dialog.getDialogPane().setContent(form);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
@@ -776,16 +821,17 @@ public class MainWindow {
             s.duplicateSHA256 = shaCb.isSelected();
             s.scanHidden = hiddenCb.isSelected();
             s.darkMode = darkCb.isSelected();
+            s.moveToTrash = trashCb.isSelected();
             s.defaultSort = sortCb.getValue();
             s.scanRoots = List.of(rootsArea.getText().split("\\n"))
                     .stream().map(String::trim).filter(l -> !l.isEmpty()).toList();
             s.projectScanEnabled = projectEnabledCb.isSelected();
-            try { s.projectScanDepth = Integer.parseInt(depthField.getText()); } catch (NumberFormatException e) {}
+            try { s.projectScanDepth = Integer.parseInt(depthField.getText()); } catch (NumberFormatException ignored) {}
             s.save();
 
             hiddenFilesCheck.setSelected(s.scanHidden);
-            scanner.setIncludeHidden(s.scanHidden);
             darkModeCheck.setSelected(s.darkMode);
+            applyScanSettings();
             applyTheme();
             sortCombo.setValue("Sort by " + capitalize(s.defaultSort));
             if (currentRoot != null) rescanCurrentRoot();
@@ -813,12 +859,11 @@ public class MainWindow {
             scannedRootPath = tree.getPath();
             applySort(tree);
             statusLabel.setText("Loaded: " + tree.getPath());
-            sizeLabel.setText(formatSize(tree.getSize()));
+            sizeLabel.setText(SizeFormat.format(tree.getSize()));
             updateCounts(tree);
             updateDiskInfo(tree.getPath());
             populateTree(tree);
-            treemapChart.setRoot(tree);
-            ringsChart.setRoot(tree);
+            resetView(tree);
             bottomTabs.setRoot(tree);
         }
     }

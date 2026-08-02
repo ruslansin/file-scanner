@@ -122,6 +122,84 @@ class FileNodeTest {
     }
 
     @Nested
+    @DisplayName("attachChild")
+    class AttachChild {
+
+        @Test
+        @DisplayName("does NOT accumulate size (unlike addChild) — for reconstructing already-sized trees")
+        void doesNotAccumulateSize() {
+            // Regression test for a real bug: CacheManager/SnapshotManager reconstruct a tree whose
+            // sizes were already computed and stored (e.g. loaded from JSON). If attachChild summed
+            // sizes the way addChild does, every ancestor's size would be inflated by its own children
+            // being counted again on top of the already-correct persisted total — worse at every level
+            // of nesting (a node N levels deep would count N+1 times).
+            var parent = new FileNode(Path.of("/tmp"), "tmp", true, 50);
+            var child = new FileNode(Path.of("/tmp/a.txt"), "a.txt", false, 50);
+
+            parent.attachChild(child);
+
+            assertEquals(1, parent.getChildren().size());
+            assertEquals(50, parent.getSize(), "attachChild must not add the child's size again");
+        }
+    }
+
+    @Nested
+    @DisplayName("copyOf")
+    class CopyOf {
+
+        @Test
+        @DisplayName("preserves sizes exactly across multiple levels of nesting (no double-counting)")
+        void preservesSizesAcrossNesting() {
+            var root = new FileNode(Path.of("/"), "/", true, 0);
+            var mid = new FileNode(Path.of("/mid"), "mid", true, 0);
+            var leaf = new FileNode(Path.of("/mid/file.txt"), "file.txt", false, 100);
+            mid.addChild(leaf);
+            root.addChild(mid);
+
+            assertEquals(100, root.getSize());
+            assertEquals(100, mid.getSize());
+
+            var copy = FileNode.copyOf(root);
+
+            assertEquals(100, copy.getSize(), "root size must not be inflated by the copy");
+            assertEquals(100, copy.getChildren().get(0).getSize(), "nested dir size must not be inflated by the copy");
+            assertEquals(100, copy.getChildren().get(0).getChildren().get(0).getSize());
+        }
+
+        @Test
+        @DisplayName("preserves symlink/hardlink/buildArtifact/lastModified flags")
+        void preservesFlags() {
+            var node = new FileNode(Path.of("/tmp/link"), "link", false, 0);
+            node.setSymlink(true);
+            node.setHardlinkReference(true);
+            node.setBuildArtifact(true);
+            node.setLastModified(12345L);
+
+            var copy = FileNode.copyOf(node);
+
+            assertTrue(copy.isSymlink());
+            assertTrue(copy.isHardlinkReference());
+            assertTrue(copy.isBuildArtifact());
+            assertEquals(12345L, copy.getLastModified());
+        }
+
+        @Test
+        @DisplayName("copy is a distinct tree — mutating the source does not affect it")
+        void copyIsIndependent() {
+            var root = new FileNode(Path.of("/"), "/", true, 0);
+            root.addChild(new FileNode(Path.of("/a.txt"), "a.txt", false, 10));
+
+            var copy = FileNode.copyOf(root);
+            root.addChild(new FileNode(Path.of("/b.txt"), "b.txt", false, 20));
+
+            assertEquals(1, copy.getChildren().size());
+            assertEquals(10, copy.getSize());
+            assertEquals(2, root.getChildren().size());
+            assertEquals(30, root.getSize());
+        }
+    }
+
+    @Nested
     @DisplayName("isLeaf")
     class IsLeaf {
 

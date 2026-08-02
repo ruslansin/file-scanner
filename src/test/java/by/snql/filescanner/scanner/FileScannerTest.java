@@ -1,6 +1,7 @@
 package by.snql.filescanner.scanner;
 
 import by.snql.filescanner.model.FileNode;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -175,19 +176,26 @@ class FileScannerTest {
 
             try {
                 Files.createSymbolicLink(tempDir.resolve("link"), realDir);
-
-                var scanner = new FileScanner();
-                var root = scanner.scan(tempDir, p -> {}).get(5, TimeUnit.SECONDS);
-
-                assertNotNull(root);
-
-                var linkChild = root.getChildren().stream()
-                        .filter(c -> "link".equals(c.getName()))
-                        .findFirst()
-                        .orElse(null);
-                assertNotNull(linkChild);
-            } catch (UnsupportedOperationException e) {
+            } catch (UnsupportedOperationException | java.io.IOException e) {
+                // Creating symlinks requires a privilege the test runner may not have
+                // (e.g. Windows without Developer Mode / admin rights) — skip rather
+                // than fail for an environment limitation unrelated to the scanner.
+                Assumptions.abort("Symlink creation not permitted in this environment: " + e.getMessage());
+                return;
             }
+
+            var scanner = new FileScanner();
+            var root = scanner.scan(tempDir, p -> {}).get(5, TimeUnit.SECONDS);
+
+            assertNotNull(root);
+
+            var linkChild = root.getChildren().stream()
+                    .filter(c -> "link".equals(c.getName()))
+                    .findFirst()
+                    .orElse(null);
+            assertNotNull(linkChild);
+            assertTrue(linkChild.isSymlink(), "symlink pointing at a directory should be flagged as a symlink, not followed");
+            assertEquals(0, linkChild.getSize());
         }
     }
 

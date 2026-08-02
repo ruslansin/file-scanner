@@ -1,4 +1,4 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.cleanup;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -118,18 +118,13 @@ class SystemCleanupTest {
     class CalculateSizesViaElevation {
 
         @Test
-        @DisplayName("returns empty map for empty list")
+        @DisplayName("returns empty map for empty list without prompting for elevation")
         void returnsEmptyForEmptyList() {
+            // Deliberately does NOT test the non-empty path: that triggers a real OS
+            // elevation prompt (UAC / pkexec / osascript), which must never happen as
+            // a side effect of running the unit test suite.
             var result = SystemCleanup.calculateSizesViaElevation(List.of());
             assertTrue(result.isEmpty());
-        }
-
-        @Test
-        @DisplayName("handles non-existent paths gracefully")
-        void handlesNonexistentPaths() {
-            var result = SystemCleanup.calculateSizesViaElevation(
-                    List.of(Path.of("/nonexistent/path")));
-            assertNotNull(result);
         }
     }
 }

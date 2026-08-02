@@ -1,24 +1,38 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.export;
 
 import by.snql.filescanner.model.FileNode;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonSyntaxException;
 
-import java.io.*;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
+/**
+ * Saves/loads/compares point-in-time snapshots of file sizes, keyed by the real
+ * filesystem path of each file (not a reconstructed string), so comparisons work
+ * correctly regardless of platform path-separator conventions.
+ */
 public class SnapshotManager {
 
     private static final Path SNAPSHOT_DIR = Path.of(System.getProperty("user.home"), ".filescanner", "snapshots");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    private SnapshotManager() {}
+
     public record SnapshotDiff(
-            List<FileNode> added,
-            List<FileNode> removed,
+            List<ChangedFile> added,
+            List<ChangedFile> removed,
             List<ChangedFile> grown,
             List<ChangedFile> shrunk
     ) {
@@ -46,9 +60,10 @@ public class SnapshotManager {
     public static void saveSnapshot(FileNode root, String name) throws IOException {
         Files.createDirectories(SNAPSHOT_DIR);
         var flat = new HashMap<String, Long>();
-        flattenSizes(root, "", flat);
+        flattenFileSizes(root, flat);
+
         var wrapper = new JsonObject();
-        var entries = new com.google.gson.JsonArray();
+        var entries = new JsonArray();
         flat.forEach((k, v) -> {
             var entry = new JsonObject();
             entry.addProperty("path", k);
@@ -56,30 +71,36 @@ public class SnapshotManager {
             entries.add(entry);
         });
         wrapper.add("entries", entries);
+
         var file = SNAPSHOT_DIR.resolve(sanitize(name) + ".json");
-        try (var w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+        var tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        try (var w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
             GSON.toJson(wrapper, w);
         }
+        Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
     }
 
     public static Map<String, Long> loadSnapshot(String name) throws IOException {
         var file = SNAPSHOT_DIR.resolve(sanitize(name) + ".json");
         var text = Files.readString(file, StandardCharsets.UTF_8);
-        return parseSizeMap(GSON.fromJson(text, JsonObject.class));
+        try {
+            return parseSizeMap(GSON.fromJson(text, JsonObject.class));
+        } catch (JsonSyntaxException e) {
+            throw new IOException("Corrupt snapshot: " + name, e);
+        }
     }
 
     public static void deleteSnapshot(String name) throws IOException {
-        var file = SNAPSHOT_DIR.resolve(sanitize(name) + ".json");
-        Files.deleteIfExists(file);
+        Files.deleteIfExists(SNAPSHOT_DIR.resolve(sanitize(name) + ".json"));
     }
 
     public static SnapshotDiff compare(FileNode current, String previousSnapshot) throws IOException {
         var prev = loadSnapshot(previousSnapshot);
         var now = new HashMap<String, Long>();
-        flattenSizes(current, "", now);
+        flattenFileSizes(current, now);
 
-        var added = new ArrayList<FileNode>();
-        var removed = new ArrayList<FileNode>();
+        var added = new ArrayList<ChangedFile>();
+        var removed = new ArrayList<ChangedFile>();
         var grown = new ArrayList<ChangedFile>();
         var shrunk = new ArrayList<ChangedFile>();
 
@@ -88,7 +109,7 @@ public class SnapshotManager {
             long curSize = entry.getValue();
             Long oldSize = prev.get(path);
             if (oldSize == null) {
-                added.add(new FileNode(Path.of(path), Path.of(path).getFileName().toString(), Files.isDirectory(Path.of(path)), curSize));
+                added.add(new ChangedFile(path, 0, curSize, curSize));
             } else if (curSize > oldSize) {
                 grown.add(new ChangedFile(path, oldSize, curSize, curSize - oldSize));
             } else if (curSize < oldSize) {
@@ -96,14 +117,14 @@ public class SnapshotManager {
             }
         }
 
-        for (var oldPath : prev.keySet()) {
-            if (!now.containsKey(oldPath)) {
-                removed.add(new FileNode(Path.of(oldPath), Path.of(oldPath).getFileName().toString(), false, oldPath.isEmpty() ? 0 : (prev.get(oldPath))));
+        for (var oldEntry : prev.entrySet()) {
+            if (!now.containsKey(oldEntry.getKey())) {
+                removed.add(new ChangedFile(oldEntry.getKey(), oldEntry.getValue(), 0, oldEntry.getValue()));
             }
         }
 
-        added.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
-        removed.sort((a, b) -> Long.compare(b.getSize(), a.getSize()));
+        added.sort((a, b) -> Long.compare(b.delta(), a.delta()));
+        removed.sort((a, b) -> Long.compare(b.delta(), a.delta()));
         grown.sort((a, b) -> Long.compare(b.delta(), a.delta()));
         shrunk.sort((a, b) -> Long.compare(b.delta(), a.delta()));
 
@@ -116,29 +137,30 @@ public class SnapshotManager {
     }
 
     public static SnapshotSummary summarize(SnapshotDiff diff) {
-        long totalAdded = diff.added.stream().mapToLong(FileNode::getSize).sum();
-        long totalRemoved = diff.removed.stream().mapToLong(FileNode::getSize).sum();
+        long totalAdded = diff.added.stream().mapToLong(ChangedFile::delta).sum();
+        long totalRemoved = diff.removed.stream().mapToLong(ChangedFile::delta).sum();
         long totalGrown = diff.grown.stream().mapToLong(ChangedFile::delta).sum();
         long totalShrunk = diff.shrunk.stream().mapToLong(ChangedFile::delta).sum();
         return new SnapshotSummary(totalAdded, totalRemoved, totalGrown, totalShrunk,
                 diff.added.size(), diff.removed.size(), diff.grown.size(), diff.shrunk.size());
     }
 
-    private static void flattenSizes(FileNode node, String prefix, Map<String, Long> out) {
-        String full = prefix.isEmpty() ? node.getPath().toString() : prefix + "/" + node.getName();
-        out.put(full, node.isDirectory() ? 0 : node.getSize());
+    /** Only regular files are tracked — directories contribute no size of their own. */
+    private static void flattenFileSizes(FileNode node, Map<String, Long> out) {
+        if (!node.isDirectory()) {
+            out.put(node.getPath().toString(), node.getSize());
+        }
         for (var child : node.getChildren()) {
-            flattenSizes(child, full, out);
+            flattenFileSizes(child, out);
         }
     }
 
     private static Map<String, Long> parseSizeMap(JsonObject root) {
         var map = new HashMap<String, Long>();
-        if (root.has("entries")) {
+        if (root != null && root.has("entries")) {
             for (var e : root.get("entries").getAsJsonArray()) {
-                if (e instanceof JsonObject entry) {
-                    map.put(entry.get("path").getAsString(), entry.has("size") ? entry.get("size").getAsLong() : 0);
-                }
+                var entry = e.getAsJsonObject();
+                map.put(entry.get("path").getAsString(), entry.has("size") ? entry.get("size").getAsLong() : 0);
             }
         }
         return map;

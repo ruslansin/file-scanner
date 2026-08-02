@@ -1,5 +1,14 @@
 package by.snql.filescanner.ui;
 
+import by.snql.filescanner.config.Settings;
+import by.snql.filescanner.core.analysis.CompressionEstimate;
+import by.snql.filescanner.core.analysis.FileAnalysis;
+import by.snql.filescanner.core.analysis.FileGrouper;
+import by.snql.filescanner.core.analysis.FileCategory;
+import by.snql.filescanner.core.cleanup.DeletionService;
+import by.snql.filescanner.core.cleanup.SystemCleanup;
+import by.snql.filescanner.core.export.SnapshotManager;
+import by.snql.filescanner.core.util.SizeFormat;
 import by.snql.filescanner.model.FileNode;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleLongProperty;
@@ -19,12 +28,14 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 public class BottomTabs {
 
     private final TabPane tabPane;
-    private final VBox emptyLabel;
 
     private final TableView<FileNode> largestTable;
     private final TableView<FileAnalysis.FileTypeStat> typesTable;
@@ -34,7 +45,7 @@ public class BottomTabs {
     private final ComboBox<String> ageFilter;
 
     private final VBox cleanupBox;
-    private final java.util.List<SystemCleanup.Target> cleanupTargets;
+    private final List<SystemCleanup.Target> cleanupTargets;
 
     private final VBox buildArtifactsBox;
 
@@ -46,16 +57,22 @@ public class BottomTabs {
 
     private FileNode root;
 
+    /** Bumped every time {@link #setRoot} is called; background tasks check it before
+     *  touching the UI so results from a superseded scan never overwrite newer data. */
+    private final AtomicLong generation = new AtomicLong();
+    private final boolean[] dirty = new boolean[TAB_COUNT];
+    private java.util.function.Consumer<String> onStatus = msg -> {};
+
+    private static final int TAB_LARGEST = 0, TAB_TYPES = 1, TAB_DUPLICATES = 2, TAB_EMPTY = 3,
+            TAB_OLD = 4, TAB_CLEANUP = 5, TAB_ARTIFACTS = 6, TAB_COMPRESS = 7, TAB_GROUPS = 8, TAB_SNAPSHOTS = 9;
+    private static final int TAB_COUNT = 10;
+
     private static final DateTimeFormatter DATE_FMT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault());
 
     public BottomTabs() {
         tabPane = new TabPane();
         tabPane.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-
-        emptyLabel = new VBox(new Label("Scan a folder to see analysis"));
-        emptyLabel.setPadding(new Insets(20));
-        emptyLabel.setAlignment(javafx.geometry.Pos.CENTER);
 
         largestTable = createLargestTable();
         typesTable = createTypesTable();
@@ -69,72 +86,101 @@ public class BottomTabs {
         ageFilter.setValue("90 days");
         ageFilter.setOnAction(e -> refreshOldFiles());
 
-        tabPane.getTabs().addAll(
-                createTab("Largest Files", wrap(largestTable)),
-                createTab("File Types", wrap(typesTable)),
-                createTab("Duplicates", wrapScroll(duplicatesBox)),
-                createTab("Empty Dirs", wrap(emptyDirsTable)),
-                createTab("Old Files", buildOldFilesPanel())
-        );
-
         cleanupTargets = SystemCleanup.targets();
         cleanupBox = new VBox(10);
         cleanupBox.setPadding(new Insets(5));
-        if (!cleanupTargets.isEmpty()) {
-            tabPane.getTabs().add(createTab("Cleanup", buildCleanupPanel()));
-        }
 
         buildArtifactsBox = new VBox(10);
         buildArtifactsBox.setPadding(new Insets(5));
-        tabPane.getTabs().add(createTab("Project Cleanup", buildArtifactsPanel()));
 
         compressBox = new VBox(10);
         compressBox.setPadding(new Insets(5));
-        tabPane.getTabs().add(createTab("Compress", wrapScroll(compressBox)));
 
         groupMode = new ComboBox<>(FXCollections.observableArrayList("File Type", "Age", "Owner"));
         groupMode.setValue("File Type");
         groupBox = new VBox(10);
         groupBox.setPadding(new Insets(5));
-        tabPane.getTabs().add(createTab("Groups", buildGroupPanel()));
 
         snapshotCombo = new ComboBox<>();
         snapshotCombo.setPromptText("Select previous snapshot");
         snapshotCombo.setPrefWidth(200);
         snapshotBox = new VBox(10);
         snapshotBox.setPadding(new Insets(5));
+
+        tabPane.getTabs().addAll(
+                createTab("Largest Files", wrap(largestTable)),
+                createTab("File Types", wrap(typesTable)),
+                createTab("Duplicates", wrapScroll(duplicatesBox)),
+                createTab("Empty Dirs", wrap(emptyDirsTable)),
+                createTab("Old Files", buildOldFilesPanel()));
+
+        if (!cleanupTargets.isEmpty()) {
+            tabPane.getTabs().add(createTab("Cleanup", buildCleanupPanel()));
+        } else {
+            tabPane.getTabs().add(new Tab("Cleanup")); // keep index alignment; hidden below
+        }
+
+        tabPane.getTabs().add(createTab("Project Cleanup", buildArtifactsPanel()));
+        tabPane.getTabs().add(createTab("Compress", wrapScroll(compressBox)));
+        tabPane.getTabs().add(createTab("Groups", buildGroupPanel()));
         tabPane.getTabs().add(createTab("Snapshots", buildSnapshotPanel()));
+
+        if (cleanupTargets.isEmpty()) {
+            tabPane.getTabs().get(TAB_CLEANUP).setDisable(true);
+        }
+
+        tabPane.getSelectionModel().selectedIndexProperty().addListener((obs, oldIdx, newIdx) -> {
+            refreshIfDirty(newIdx.intValue());
+        });
     }
 
     public TabPane getPane() { return tabPane; }
 
+    /** Called by the host UI to receive short human-readable status/error messages. */
+    public void setOnStatus(java.util.function.Consumer<String> reporter) {
+        this.onStatus = reporter;
+    }
+
+    private void reportStatus(String msg) {
+        onStatus.accept(msg);
+    }
+
     public void setRoot(FileNode node) {
         this.root = node;
+        generation.incrementAndGet();
         if (node == null) {
             tabPane.setVisible(false);
             return;
         }
         tabPane.setVisible(true);
-        refreshLargest();
-        refreshTypes();
-        refreshDuplicates();
-        refreshEmptyDirs();
-        refreshOldFiles();
-        refreshCleanup();
-        refreshBuildArtifacts();
-        refreshCompress();
-        refreshGroups();
-        refreshSnapshots();
+        java.util.Arrays.fill(dirty, true);
+        refreshIfDirty(tabPane.getSelectionModel().getSelectedIndex());
+    }
+
+    private void refreshIfDirty(int index) {
+        if (index < 0 || index >= TAB_COUNT || !dirty[index] || root == null) return;
+        dirty[index] = false;
+        switch (index) {
+            case TAB_LARGEST -> refreshLargest();
+            case TAB_TYPES -> refreshTypes();
+            case TAB_DUPLICATES -> refreshDuplicates();
+            case TAB_EMPTY -> refreshEmptyDirs();
+            case TAB_OLD -> refreshOldFiles();
+            case TAB_CLEANUP -> refreshCleanup();
+            case TAB_ARTIFACTS -> refreshBuildArtifacts();
+            case TAB_COMPRESS -> refreshCompress();
+            case TAB_GROUPS -> refreshGroups();
+            case TAB_SNAPSHOTS -> refreshSnapshots();
+            default -> { }
+        }
     }
 
     private void refreshLargest() {
-        if (root == null) return;
         var files = FileAnalysis.largestFiles(root, 100);
         largestTable.setItems(FXCollections.observableArrayList(files));
     }
 
     private void refreshEmptyDirs() {
-        if (root == null) return;
         var dirs = FileAnalysis.findEmptyDirs(root);
         emptyDirsTable.setItems(FXCollections.observableArrayList(dirs));
     }
@@ -155,7 +201,6 @@ public class BottomTabs {
     }
 
     private void refreshTypes() {
-        if (root == null) return;
         var map = FileAnalysis.fileTypeBreakdown(root);
         var list = map.values().stream()
                 .sorted(Comparator.comparingLong(FileAnalysis.FileTypeStat::getTotalSize).reversed())
@@ -164,98 +209,99 @@ public class BottomTabs {
     }
 
     private void refreshDuplicates() {
-        if (root == null) return;
         if (!Settings.get().duplicateSHA256) {
-            duplicatesBox.getChildren().clear();
-            duplicatesBox.getChildren().add(new Label("Duplicate detection is disabled."));
-            duplicatesBox.getChildren().add(new Label(
-                    "Enable SHA-256 in Settings (⚙) for exact content-based duplicate detection."));
+            duplicatesBox.getChildren().setAll(
+                    new Label("Duplicate detection is disabled."),
+                    new Label("Enable SHA-256 in Settings (\u2699) for exact content-based duplicate detection."));
             return;
         }
 
         FileNode r = root;
-        duplicatesBox.getChildren().clear();
-        duplicatesBox.getChildren().add(new Label("Scanning for duplicates..."));
+        long myGen = generation.get();
+        duplicatesBox.getChildren().setAll(new Label("Scanning for duplicates..."));
 
         Thread.ofVirtual().start(() -> {
             var groups = FileAnalysis.findDuplicates(r);
             Platform.runLater(() -> {
-                duplicatesBox.getChildren().clear();
-
-                if (groups.isEmpty()) {
-                    duplicatesBox.getChildren().add(new Label("No duplicates found."));
-                    return;
-                }
-
-                duplicatesBox.getChildren().add(new Label(
-                        "SHA-256 content hashing. Excludes: .git/, node_modules/, target/, ..."));
-
-                long wasted = FileAnalysis.totalDuplicateWaste(groups);
-                duplicatesBox.getChildren().add(new Label(
-                        "Showing top " + groups.size() + " duplicate groups. Wasted space: " +
-                        MainWindow.formatSize(wasted)));
-                duplicatesBox.getChildren().add(new Label(
-                        "Excludes: .git/, node_modules/, target/, __pycache__/, build/, dist/, vendor/, .venv/"));
-
-                for (var group : groups) {
-                    var groupBox = new VBox(3);
-                    groupBox.setStyle("-fx-border-color: #ddd; -fx-border-radius: 4; -fx-padding: 5;");
-
-                    String prefix = FileAnalysis.commonPathPrefix(group.files);
-                    var header = new Label(group.files.size() + " identical files × " +
-                            MainWindow.formatSize(group.fileSize) + " each  (waste: " +
-                            MainWindow.formatSize(group.wastedSize()) + ")");
-                    header.setStyle("-fx-font-weight: bold;");
-                    groupBox.getChildren().add(header);
-
-                    if (!prefix.isEmpty()) {
-                        var loc = new Label("  in " + prefix);
-                        loc.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-                        groupBox.getChildren().add(loc);
-                    }
-
-                    int shown = 0;
-                    for (var file : group.files) {
-                        if (shown++ >= 3) break;
-                        var cb = new CheckBox(file.getPath().toString() + "  (" +
-                                MainWindow.formatSize(file.getSize()) + ")");
-                        groupBox.getChildren().add(cb);
-                    }
-                    if (group.files.size() > 3) {
-                        groupBox.getChildren().add(new Label("  … and " + (group.files.size() - 3) +
-                                " more files"));
-                    }
-
-                    duplicatesBox.getChildren().add(groupBox);
-                }
-
-                var deleteBtn = new Button("Delete Selected");
-                deleteBtn.setOnAction(e -> deleteSelectedDuplicates());
-                duplicatesBox.getChildren().add(deleteBtn);
+                if (generation.get() != myGen) return;
+                renderDuplicates(groups);
             });
         });
     }
 
+    private void renderDuplicates(List<FileAnalysis.DuplicateGroup> groups) {
+        duplicatesBox.getChildren().clear();
+
+        if (groups.isEmpty()) {
+            duplicatesBox.getChildren().add(new Label("No duplicates found."));
+            return;
+        }
+
+        long wasted = FileAnalysis.totalDuplicateWaste(groups);
+        duplicatesBox.getChildren().add(new Label(
+                "Showing top " + groups.size() + " duplicate groups. Wasted space: " + SizeFormat.format(wasted)));
+        duplicatesBox.getChildren().add(new Label(
+                "Excludes: .git/, node_modules/, target/, __pycache__/, build/, dist/, vendor/, .venv/"));
+
+        for (var group : groups) {
+            var groupBox = new VBox(3);
+            groupBox.setStyle("-fx-border-color: #ddd; -fx-border-radius: 4; -fx-padding: 5;");
+
+            String prefix = FileAnalysis.commonPathPrefix(group.files);
+            var header = new Label(group.files.size() + " identical files \u00d7 " +
+                    SizeFormat.format(group.fileSize) + " each  (waste: " +
+                    SizeFormat.format(group.wastedSize()) + ")");
+            header.setStyle("-fx-font-weight: bold;");
+            groupBox.getChildren().add(header);
+
+            if (!prefix.isEmpty()) {
+                var loc = new Label("  in " + prefix);
+                loc.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
+                groupBox.getChildren().add(loc);
+            }
+
+            int shown = 0;
+            for (var file : group.files) {
+                if (shown++ >= 3) break;
+                var cb = new CheckBox(file.getPath() + "  (" + SizeFormat.format(file.getSize()) + ")");
+                cb.setUserData(file); // avoid parsing the label back into a path
+                groupBox.getChildren().add(cb);
+            }
+            if (group.files.size() > 3) {
+                groupBox.getChildren().add(new Label("  \u2026 and " + (group.files.size() - 3) + " more files"));
+            }
+
+            duplicatesBox.getChildren().add(groupBox);
+        }
+
+        var deleteBtn = new Button("Delete Selected");
+        deleteBtn.setOnAction(e -> deleteSelectedDuplicates());
+        duplicatesBox.getChildren().add(deleteBtn);
+    }
+
     private void deleteSelectedDuplicates() {
-        int deleted = 0;
+        var toDelete = new ArrayList<Path>();
         for (var node : duplicatesBox.getChildren()) {
             if (node instanceof VBox groupBox) {
                 for (var child : groupBox.getChildren()) {
-                    if (child instanceof CheckBox cb && cb.isSelected()) {
-                        try {
-                            Files.delete(Path.of(cb.getText().split("  \\(")[0]));
-                            deleted++;
-                        } catch (IOException ignored) {}
+                    if (child instanceof CheckBox cb && cb.isSelected() && cb.getUserData() instanceof FileNode fn) {
+                        toDelete.add(fn.getPath());
                     }
                 }
             }
         }
-        if (deleted > 0) refreshDuplicates();
+        if (toDelete.isEmpty()) return;
+
+        if (!confirmDelete("Delete " + toDelete.size() + " duplicate file(s)?", null)) return;
+
+        var result = DeletionService.delete(toDelete, Settings.get().moveToTrash);
+        reportDeletionResult(result);
+        if (!result.deleted().isEmpty()) refreshDuplicates();
     }
 
     private void refreshOldFiles() {
-        if (root == null) return;
         FileNode r = root;
+        long myGen = generation.get();
         String selected = ageFilter.getValue();
         long millis = switch (selected) {
             case "30 days" -> 30L;
@@ -267,7 +313,10 @@ public class BottomTabs {
 
         Thread.ofVirtual().start(() -> {
             var files = FileAnalysis.oldFiles(r, millis);
-            Platform.runLater(() -> oldFilesTable.setItems(FXCollections.observableArrayList(files)));
+            Platform.runLater(() -> {
+                if (generation.get() != myGen) return;
+                oldFilesTable.setItems(FXCollections.observableArrayList(files));
+            });
         });
     }
 
@@ -280,13 +329,11 @@ public class BottomTabs {
         nameCol.setPrefWidth(300);
 
         var sizeCol = new TableColumn<FileNode, String>("Size");
-        sizeCol.setCellValueFactory(c ->
-                new SimpleStringProperty(MainWindow.formatSize(c.getValue().getSize())));
+        sizeCol.setCellValueFactory(c -> new SimpleStringProperty(SizeFormat.format(c.getValue().getSize())));
         sizeCol.setPrefWidth(100);
 
         var pathCol = new TableColumn<FileNode, String>("Path");
-        pathCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getPath().toString()));
+        pathCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPath().toString()));
 
         table.getColumns().addAll(nameCol, sizeCol, pathCol);
         return table;
@@ -304,8 +351,7 @@ public class BottomTabs {
         countCol.setCellValueFactory(c -> new SimpleLongProperty(c.getValue().getCount()));
 
         var sizeCol = new TableColumn<FileAnalysis.FileTypeStat, String>("Total Size");
-        sizeCol.setCellValueFactory(c ->
-                new SimpleStringProperty(MainWindow.formatSize(c.getValue().getTotalSize())));
+        sizeCol.setCellValueFactory(c -> new SimpleStringProperty(SizeFormat.format(c.getValue().getTotalSize())));
 
         table.getColumns().addAll(extCol, countCol, sizeCol);
         return table;
@@ -321,20 +367,18 @@ public class BottomTabs {
 
         var ageCol = new TableColumn<FileNode, String>("Last Modified");
         ageCol.setCellValueFactory(c -> {
-            long millis = millis(c.getValue());
+            long millis = c.getValue().getLastModified();
             return new SimpleStringProperty(
                     millis > 0 ? DATE_FMT.format(Instant.ofEpochMilli(millis)) : "unknown");
         });
         ageCol.setPrefWidth(130);
 
         var sizeCol = new TableColumn<FileNode, String>("Size");
-        sizeCol.setCellValueFactory(c ->
-                new SimpleStringProperty(MainWindow.formatSize(c.getValue().getSize())));
+        sizeCol.setCellValueFactory(c -> new SimpleStringProperty(SizeFormat.format(c.getValue().getSize())));
         sizeCol.setPrefWidth(100);
 
         var pathCol = new TableColumn<FileNode, String>("Path");
-        pathCol.setCellValueFactory(c ->
-                new SimpleStringProperty(c.getValue().getPath().toString()));
+        pathCol.setCellValueFactory(c -> new SimpleStringProperty(c.getValue().getPath().toString()));
 
         table.getColumns().addAll(nameCol, ageCol, sizeCol, pathCol);
         return table;
@@ -345,14 +389,6 @@ public class BottomTabs {
         var box = new VBox(8, label, ageFilter, oldFilesTable);
         VBox.setVgrow(oldFilesTable, javafx.scene.layout.Priority.ALWAYS);
         return box;
-    }
-
-    private long millis(FileNode file) {
-        try {
-            return Files.getLastModifiedTime(file.getPath()).toMillis();
-        } catch (IOException e) {
-            return 0;
-        }
     }
 
     private static Tab createTab(String title, javafx.scene.Node content) {
@@ -375,16 +411,19 @@ public class BottomTabs {
         return scroll;
     }
 
+    // ── Cleanup ──────────────────────────────────────────────────────────
+
     private void refreshCleanup() {
         cleanupBox.getChildren().clear();
         if (cleanupTargets.isEmpty()) return;
+        long myGen = generation.get();
 
-        var header = new Label("System & Developer caches — total: scanning in parallel...");
+        var header = new Label("System & Developer caches \u2014 total: scanning in parallel...");
         header.setStyle("-fx-font-weight: bold;");
         cleanupBox.getChildren().add(header);
         cleanupBox.getChildren().add(new Label("Scanning " + cleanupTargets.size() + " targets..."));
 
-        var thread = new Thread(() -> {
+        Thread.ofVirtual().start(() -> {
             var sizes = new java.util.concurrent.ConcurrentHashMap<SystemCleanup.Target, Long>();
             var needsElevationList = java.util.Collections.synchronizedList(new ArrayList<Path>());
 
@@ -394,7 +433,7 @@ public class BottomTabs {
                             long size = SystemCleanup.calculateSize(target);
                             sizes.put(target, size);
                             var resolved = SystemCleanup.resolvePath(target);
-                            if (size == 0 && resolved != null && java.nio.file.Files.exists(resolved)) {
+                            if (size == 0 && resolved != null && Files.exists(resolved)) {
                                 needsElevationList.add(resolved);
                             }
                         }, executor))
@@ -403,25 +442,23 @@ public class BottomTabs {
             }
 
             Platform.runLater(() -> {
+                if (generation.get() != myGen) return;
                 cleanupBox.getChildren().clear();
-                var h = new Label("System & Developer caches — total: (calculating...)");
+                var h = new Label("System & Developer caches \u2014 total: (calculating...)");
                 h.setStyle("-fx-font-weight: bold;");
                 cleanupBox.getChildren().add(h);
 
-                var sortedTargets = new ArrayList<>(cleanupTargets);
-                var grid = buildCleanupGrid(sortedTargets, sizes, h, needsElevationList);
+                var grid = buildCleanupGrid(cleanupTargets, sizes, h, needsElevationList);
                 cleanupBox.getChildren().add(grid);
                 maybeShowElevateButton(needsElevationList, grid, h);
             });
         });
-        thread.setDaemon(true);
-        thread.start();
     }
 
     private javafx.scene.layout.GridPane buildCleanupGrid(
-            java.util.List<SystemCleanup.Target> targets,
-            java.util.Map<SystemCleanup.Target, Long> sizes,
-            Label header, java.util.List<Path> needsElevationList) {
+            List<SystemCleanup.Target> targets,
+            Map<SystemCleanup.Target, Long> sizes,
+            Label header, List<Path> needsElevationList) {
 
         var grid = new javafx.scene.layout.GridPane();
         grid.setHgap(10);
@@ -436,8 +473,10 @@ public class BottomTabs {
             var resolved = SystemCleanup.resolvePath(target);
             boolean locked = needsElevationList.contains(resolved);
 
-            var nameLabel = new Label((locked ? "🔒 " : "") + target.name());
-            var sizeLabel = new Label(locked ? "locked" : MainWindow.formatSize(size));
+            var nameLabel = new Label((locked ? "\uD83D\uDD12 " : "") + target.name() +
+                    (target.isHighRisk() ? " \u26A0" : ""));
+            if (target.isHighRisk()) nameLabel.setStyle("-fx-text-fill: #c0392b;");
+            var sizeLabel = new Label(locked ? "locked" : SizeFormat.format(size));
             sizeLabel.setId("size-" + row);
 
             grid.add(nameLabel, 0, row);
@@ -452,52 +491,64 @@ public class BottomTabs {
                     if (resolved != null && Desktop.isDesktopSupported()) {
                         Desktop.getDesktop().open(resolved.toFile());
                     }
-                } catch (IOException ignored) {}
+                } catch (IOException ex) {
+                    reportStatus("Cannot open: " + ex.getMessage());
+                }
             });
+            actions.getChildren().add(openBtn);
 
             if (target.customCommand() != null && !target.customCommand().isEmpty()) {
                 var cmdBtn = new Button("Run");
                 cmdBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #2980b9;");
-                cmdBtn.setOnAction(e -> {
-                    try {
-                        ProcessBuilder pb = new ProcessBuilder();
-                        if (System.getProperty("os.name").toLowerCase().contains("win")) {
-                            pb.command("cmd", "/c", target.customCommand());
-                        } else {
-                            pb.command("sh", "-c", target.customCommand());
-                        }
-                        pb.inheritIO().start();
-                    } catch (IOException ignored) {}
-                });
+                cmdBtn.setOnAction(e -> confirmAndRunCommand(target));
                 actions.getChildren().add(cmdBtn);
             }
 
             var deleteBtn = new Button("Delete");
             deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
-            deleteBtn.setOnAction(e -> {
-                var confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                confirm.setTitle("Delete " + target.name());
-                confirm.setHeaderText("Delete " + target.name() + "?");
-                confirm.setContentText((resolved != null ? resolved.toString() : "") +
-                        "\nSize: " + MainWindow.formatSize(size));
-                if (confirm.showAndWait().orElse(null) == ButtonType.OK && resolved != null) {
-                    try {
-                        deleteRecursive(resolved);
-                        refreshCleanup();
-                    } catch (IOException ignored) {}
-                }
-            });
+            deleteBtn.setOnAction(e -> deleteCleanupTarget(target, resolved, size));
+            actions.getChildren().add(deleteBtn);
 
-            actions.getChildren().addAll(openBtn, deleteBtn);
             grid.add(actions, 3, row);
             row++;
         }
 
-        header.setText("System & Developer caches — total: " + MainWindow.formatSize(grandTotal));
+        header.setText("System & Developer caches \u2014 total: " + SizeFormat.format(grandTotal));
         return grid;
     }
 
-    private void maybeShowElevateButton(java.util.List<Path> needsElevation,
+    private void confirmAndRunCommand(SystemCleanup.Target target) {
+        var confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.setTitle("Run command");
+        confirm.setHeaderText("Run this command on your system?");
+        confirm.setContentText(target.customCommand());
+        if (confirm.showAndWait().orElse(null) != ButtonType.OK) return;
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder();
+            if (System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("win")) {
+                pb.command("cmd", "/c", target.customCommand());
+            } else {
+                pb.command("sh", "-c", target.customCommand());
+            }
+            pb.inheritIO().start();
+        } catch (IOException ex) {
+            reportStatus("Failed to run command: " + ex.getMessage());
+        }
+    }
+
+    private void deleteCleanupTarget(SystemCleanup.Target target, Path resolved, long size) {
+        if (!confirmDelete("Delete " + target.name() + "?",
+                (resolved != null ? resolved.toString() : "") + "\nSize: " + SizeFormat.format(size)
+                        + (target.isHighRisk() ? "\n\n\u26A0 This location carries extra risk if deleted." : ""))) {
+            return;
+        }
+        var result = SystemCleanup.delete(target);
+        reportDeletionResult(result);
+        refreshCleanup();
+    }
+
+    private void maybeShowElevateButton(List<Path> needsElevation,
                                          javafx.scene.layout.GridPane grid, Label header) {
         if (needsElevation.isEmpty()) return;
 
@@ -506,23 +557,23 @@ public class BottomTabs {
         elevateBtn.setOnAction(e -> {
             elevateBtn.setDisable(true);
             elevateBtn.setText("Requesting elevated access...");
-            javafx.application.Platform.runLater(() -> {
+            Thread.ofVirtual().start(() -> {
                 var sizes = SystemCleanup.calculateSizesViaElevation(needsElevation);
-                javafx.application.Platform.runLater(() -> {
+                Platform.runLater(() -> {
                     for (var entry : sizes.entrySet()) {
                         for (int i = 0; i < cleanupTargets.size(); i++) {
                             var t = cleanupTargets.get(i);
                             var r = SystemCleanup.resolvePath(t);
                             if (r != null && r.equals(entry.getKey())) {
                                 var label = (Label) grid.lookup("#size-" + i);
-                                if (label != null) label.setText(MainWindow.formatSize(entry.getValue()));
+                                if (label != null) label.setText(SizeFormat.format(entry.getValue()));
                                 break;
                             }
                         }
                     }
                     elevateBtn.setText("Scan as Root");
                     elevateBtn.setDisable(false);
-                    header.setText("System & Developer caches — total: (refresh to recalculate)");
+                    header.setText("System & Developer caches \u2014 total: (refresh to recalculate)");
                 });
             });
         });
@@ -542,9 +593,10 @@ public class BottomTabs {
                 "Edit ~/.filescanner/cleanup-targets.json to add your own paths"));
         topBar.setPadding(new Insets(0, 0, 5, 0));
 
-        var box = new VBox(8, topBar, scroll);
-        return box;
+        return new VBox(8, topBar, scroll);
     }
+
+    // ── Project Cleanup (build artifacts) ───────────────────────────────
 
     private void refreshBuildArtifacts() {
         buildArtifactsBox.getChildren().clear();
@@ -555,102 +607,107 @@ public class BottomTabs {
         }
 
         buildArtifactsBox.getChildren().add(new Label("Scanning project roots..."));
+        long myGen = generation.get();
 
-        var thread = new Thread(() -> {
+        Thread.ofVirtual().start(() -> {
             var roots = SystemCleanup.scanRoots();
             var artifacts = SystemCleanup.findBuildArtifacts(roots);
+            // Compute sizes on this background thread — NOT inside Platform.runLater.
+            var sizes = new java.util.HashMap<SystemCleanup.BuildArtifact, Long>();
+            long total = 0;
+            for (var a : artifacts) {
+                long size = SystemCleanup.walkSizeSafe(a.path());
+                sizes.put(a, size);
+                total += size;
+            }
+            long finalTotal = total;
 
             Platform.runLater(() -> {
-                buildArtifactsBox.getChildren().clear();
-
-                if (artifacts.isEmpty()) {
-                    buildArtifactsBox.getChildren().add(new Label(
-                            "No build artifacts found in scan roots."));
-                    return;
-                }
-
-                var totalSize = new java.util.concurrent.atomic.AtomicLong();
-                var grid = new javafx.scene.layout.GridPane();
-                grid.setHgap(10);
-                grid.setVgap(5);
-
-                int row = 0;
-                String lastType = "";
-
-                for (var a : artifacts) {
-                    long size = SystemCleanup.walkSizeSafe(a.path());
-                    totalSize.addAndGet(size);
-
-                    if (!a.projectType().displayName().equals(lastType)) {
-                        lastType = a.projectType().displayName();
-                        var typeLabel = new Label(lastType + " (" + a.projectType().name() + ")");
-                        typeLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #3498db;");
-                        grid.add(typeLabel, 0, row++, 4, 1);
-                    }
-
-                    var nameLabel = new Label("  " + a.artifactName());
-                    var sizeLabel = new Label(MainWindow.formatSize(size));
-                    var pathLabel = new Label(a.projectDir().toString());
-                    pathLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
-
-                    grid.add(nameLabel, 0, row);
-                    grid.add(sizeLabel, 1, row);
-                    grid.add(pathLabel, 2, row);
-
-                    var actions = new HBox(5);
-                    var openBtn = new Button("Open");
-                    openBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6;");
-                    openBtn.setOnAction(e -> {
-                        try {
-                            if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(a.path().toFile());
-                        } catch (IOException ignored) {}
-                    });
-
-                    var deleteBtn = new Button("Delete");
-                    deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
-                    deleteBtn.setOnAction(e -> {
-                        var confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                        confirm.setTitle("Delete " + a.artifactName());
-                        confirm.setHeaderText("Delete build artifact?");
-                        confirm.setContentText(a.path() + "\nSize: " + MainWindow.formatSize(size));
-                        if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-                            try { deleteRecursive(a.path()); refreshBuildArtifacts(); }
-                            catch (IOException ignored) {}
-                        }
-                    });
-
-                    actions.getChildren().addAll(openBtn, deleteBtn);
-                    grid.add(actions, 3, row);
-                    row++;
-                }
-
-                var header = new Label("Project Build Artifacts — total: " + MainWindow.formatSize(totalSize.get()) +
-                        " in " + artifacts.size() + " artifacts");
-                header.setStyle("-fx-font-weight: bold;");
-                buildArtifactsBox.getChildren().add(header);
-
-                var deleteAllBtn = new Button("Delete All (" + MainWindow.formatSize(totalSize.get()) + ")");
-                deleteAllBtn.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold;");
-                final long finalTotal = totalSize.get();
-                deleteAllBtn.setOnAction(e -> {
-                    var confirm = new Alert(Alert.AlertType.CONFIRMATION);
-                    confirm.setTitle("Delete All Build Artifacts");
-                    confirm.setHeaderText("Delete " + artifacts.size() + " build artifacts?");
-                    confirm.setContentText("Total: " + MainWindow.formatSize(finalTotal) +
-                            "\n\nThese can be regenerated by rebuilding the projects.");
-                    if (confirm.showAndWait().orElse(null) == ButtonType.OK) {
-                        for (var a : artifacts) {
-                            try { deleteRecursive(a.path()); } catch (IOException ignored) {}
-                        }
-                        refreshBuildArtifacts();
-                    }
-                });
-                buildArtifactsBox.getChildren().add(deleteAllBtn);
-                buildArtifactsBox.getChildren().add(grid);
+                if (generation.get() != myGen) return;
+                renderBuildArtifacts(artifacts, sizes, finalTotal);
             });
         });
-        thread.setDaemon(true);
-        thread.start();
+    }
+
+    private void renderBuildArtifacts(List<SystemCleanup.BuildArtifact> artifacts,
+                                       Map<SystemCleanup.BuildArtifact, Long> sizes, long totalSize) {
+        buildArtifactsBox.getChildren().clear();
+
+        if (artifacts.isEmpty()) {
+            buildArtifactsBox.getChildren().add(new Label("No build artifacts found in scan roots."));
+            return;
+        }
+
+        var grid = new javafx.scene.layout.GridPane();
+        grid.setHgap(10);
+        grid.setVgap(5);
+
+        int row = 0;
+        String lastType = "";
+
+        for (var a : artifacts) {
+            long size = sizes.getOrDefault(a, 0L);
+
+            if (!a.projectType().displayName().equals(lastType)) {
+                lastType = a.projectType().displayName();
+                var typeLabel = new Label(lastType + " (" + a.projectType().name() + ")");
+                typeLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #3498db;");
+                grid.add(typeLabel, 0, row++, 4, 1);
+            }
+
+            var nameLabel = new Label("  " + a.artifactName());
+            var sizeLabel = new Label(SizeFormat.format(size));
+            var pathLabel = new Label(a.projectDir().toString());
+            pathLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #888;");
+
+            grid.add(nameLabel, 0, row);
+            grid.add(sizeLabel, 1, row);
+            grid.add(pathLabel, 2, row);
+
+            var actions = new HBox(5);
+            var openBtn = new Button("Open");
+            openBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6;");
+            openBtn.setOnAction(e -> {
+                try {
+                    if (Desktop.isDesktopSupported()) Desktop.getDesktop().open(a.path().toFile());
+                } catch (IOException ex) {
+                    reportStatus("Cannot open: " + ex.getMessage());
+                }
+            });
+
+            var deleteBtn = new Button("Delete");
+            deleteBtn.setStyle("-fx-font-size: 11px; -fx-padding: 2 6; -fx-text-fill: #c0392b;");
+            deleteBtn.setOnAction(e -> {
+                if (!confirmDelete("Delete build artifact?", a.path() + "\nSize: " + SizeFormat.format(size))) return;
+                var result = DeletionService.delete(List.of(a.path()), Settings.get().moveToTrash);
+                reportDeletionResult(result);
+                refreshBuildArtifacts();
+            });
+
+            actions.getChildren().addAll(openBtn, deleteBtn);
+            grid.add(actions, 3, row);
+            row++;
+        }
+
+        var header = new Label("Project Build Artifacts \u2014 total: " + SizeFormat.format(totalSize) +
+                " in " + artifacts.size() + " artifacts");
+        header.setStyle("-fx-font-weight: bold;");
+        buildArtifactsBox.getChildren().add(header);
+
+        var deleteAllBtn = new Button("Delete All (" + SizeFormat.format(totalSize) + ")");
+        deleteAllBtn.setStyle("-fx-background-color: #e74c3c; -fx-text-fill: white; -fx-font-weight: bold;");
+        deleteAllBtn.setOnAction(e -> {
+            if (!confirmDelete("Delete " + artifacts.size() + " build artifacts?",
+                    "Total: " + SizeFormat.format(totalSize) + "\n\nThese can be regenerated by rebuilding the projects.")) {
+                return;
+            }
+            var paths = artifacts.stream().map(SystemCleanup.BuildArtifact::path).toList();
+            var result = DeletionService.delete(paths, Settings.get().moveToTrash);
+            reportDeletionResult(result);
+            refreshBuildArtifacts();
+        });
+        buildArtifactsBox.getChildren().add(deleteAllBtn);
+        buildArtifactsBox.getChildren().add(grid);
     }
 
     private javafx.scene.Node buildArtifactsPanel() {
@@ -669,23 +726,25 @@ public class BottomTabs {
         return new VBox(8, topBar, scroll);
     }
 
+    // ── Compress ─────────────────────────────────────────────────────────
+
     private void refreshCompress() {
         compressBox.getChildren().clear();
         if (root == null) return;
 
         var estimate = CompressionEstimate.estimate(root);
         compressBox.getChildren().add(new Label("Compression Potential"));
-        compressBox.getChildren().add(new Label("Original: " + MainWindow.formatSize(estimate.originalSize())));
-        compressBox.getChildren().add(new Label("Estimated after compression: " + MainWindow.formatSize(estimate.estimatedCompressed())));
-        compressBox.getChildren().add(new Label("Could save: " + MainWindow.formatSize(estimate.savings()) +
-                " (" + String.format("%.0f%%", (1 - estimate.ratio()) * 100) + ")"));
+        compressBox.getChildren().add(new Label("Original: " + SizeFormat.format(estimate.originalSize())));
+        compressBox.getChildren().add(new Label("Estimated after compression: " + SizeFormat.format(estimate.estimatedCompressed())));
+        compressBox.getChildren().add(new Label("Could save: " + SizeFormat.format(estimate.savings()) +
+                " (" + String.format(java.util.Locale.ROOT, "%.0f%%", (1 - estimate.ratio()) * 100) + ")"));
         compressBox.getChildren().add(new Label("Strategy: " + estimate.strategy()));
         compressBox.getChildren().add(new Label(""));
 
-        var byCat = new java.util.HashMap<FileTypeCategory, long[]>();
+        var byCat = new java.util.HashMap<FileCategory, long[]>();
         var files = FileAnalysis.flattenFiles(root);
         for (var f : files) {
-            var cat = FileTypeCategory.forFile(f.getName());
+            var cat = FileCategory.forFile(f.getName());
             var arr = byCat.computeIfAbsent(cat, k -> new long[2]);
             arr[0] += f.getSize();
             arr[1] += CompressionEstimate.estimateCompressedSize(f);
@@ -707,28 +766,42 @@ public class BottomTabs {
             long compressed = entry.getValue()[1];
             long save = orig - compressed;
             grid.add(new Label(entry.getKey().name()), 0, row);
-            grid.add(new Label(MainWindow.formatSize(orig)), 1, row);
-            grid.add(new Label(MainWindow.formatSize(compressed)), 2, row);
-            grid.add(new Label(MainWindow.formatSize(save)), 3, row);
+            grid.add(new Label(SizeFormat.format(orig)), 1, row);
+            grid.add(new Label(SizeFormat.format(compressed)), 2, row);
+            grid.add(new Label(SizeFormat.format(save)), 3, row);
             row++;
         }
         compressBox.getChildren().add(grid);
     }
 
+    // ── Groups ───────────────────────────────────────────────────────────
+
     private void refreshGroups() {
         groupBox.getChildren().clear();
         if (root == null) return;
-
+        FileNode r = root;
+        long myGen = generation.get();
         String mode = groupMode.getValue();
-        var groups = switch (mode) {
-            case "Age" -> FileGrouper.byAge(root);
-            case "Owner" -> FileGrouper.byOwner(root);
-            default -> FileGrouper.byFileType(root);
-        };
 
+        groupBox.getChildren().add(new Label("Grouping..."));
+
+        Thread.ofVirtual().start(() -> {
+            var groups = switch (mode) {
+                case "Age" -> FileGrouper.byAge(r);
+                case "Owner" -> FileGrouper.byOwner(r); // I/O per file — must stay off the FX thread
+                default -> FileGrouper.byFileType(r);
+            };
+            Platform.runLater(() -> {
+                if (generation.get() != myGen) return;
+                renderGroups(mode, groups);
+            });
+        });
+    }
+
+    private void renderGroups(String mode, List<FileGrouper.Group> groups) {
+        groupBox.getChildren().clear();
         long totalSize = groups.stream().mapToLong(FileGrouper.Group::totalSize).sum();
-        var header = new Label(mode + " grouping — " + groups.size() + " groups, " +
-                MainWindow.formatSize(totalSize));
+        var header = new Label(mode + " grouping \u2014 " + groups.size() + " groups, " + SizeFormat.format(totalSize));
         header.setStyle("-fx-font-weight: bold;");
         groupBox.getChildren().add(header);
 
@@ -745,8 +818,8 @@ public class BottomTabs {
             double pct = totalSize > 0 ? (double) g.totalSize() / totalSize * 100 : 0;
             grid.add(new Label(g.name()), 0, row);
             grid.add(new Label(String.valueOf(g.fileCount())), 1, row);
-            grid.add(new Label(MainWindow.formatSize(g.totalSize())), 2, row);
-            grid.add(new Label(String.format("%.1f%%", pct)), 3, row);
+            grid.add(new Label(SizeFormat.format(g.totalSize())), 2, row);
+            grid.add(new Label(String.format(java.util.Locale.ROOT, "%.1f%%", pct)), 3, row);
             row++;
         }
         groupBox.getChildren().add(grid);
@@ -765,6 +838,8 @@ public class BottomTabs {
         return new VBox(8, topBar, scroll);
     }
 
+    // ── Snapshots ────────────────────────────────────────────────────────
+
     private void refreshSnapshots() {
         snapshotBox.getChildren().clear();
         var snaps = SnapshotManager.listSnapshots();
@@ -780,15 +855,14 @@ public class BottomTabs {
             if (nameField.getText().isEmpty() || root == null) return;
             try {
                 SnapshotManager.saveSnapshot(root, nameField.getText());
-                statusLabel("Snapshot saved: " + nameField.getText());
+                reportStatus("Snapshot saved: " + nameField.getText());
                 refreshSnapshots();
             } catch (IOException ex) {
-                statusLabel("Failed to save: " + ex.getMessage());
+                reportStatus("Failed to save: " + ex.getMessage());
             }
         });
 
-        snapshotBox.getChildren().addAll(saveLabel,
-                new HBox(10, nameField, saveBtn));
+        snapshotBox.getChildren().addAll(saveLabel, new HBox(10, nameField, saveBtn));
 
         if (snaps.isEmpty()) {
             snapshotBox.getChildren().add(new Label("No previous snapshots."));
@@ -807,7 +881,7 @@ public class BottomTabs {
                 var diff = SnapshotManager.compare(root, selected);
                 showDiff(diff);
             } catch (IOException ex) {
-                statusLabel("Compare failed: " + ex.getMessage());
+                reportStatus("Compare failed: " + ex.getMessage());
             }
         });
         compareBox.getChildren().add(compareBtn);
@@ -821,7 +895,9 @@ public class BottomTabs {
             try {
                 SnapshotManager.deleteSnapshot(selected);
                 refreshSnapshots();
-            } catch (IOException ignored) {}
+            } catch (IOException ex) {
+                reportStatus("Failed to delete snapshot: " + ex.getMessage());
+            }
         });
         snapshotBox.getChildren().add(deleteBtn);
     }
@@ -829,8 +905,7 @@ public class BottomTabs {
     private void showDiff(SnapshotManager.SnapshotDiff diff) {
         var dialog = new Dialog<Void>();
         dialog.setTitle("Snapshot Comparison");
-        dialog.setWidth(600);
-        dialog.setHeight(500);
+        dialog.getDialogPane().setPrefSize(600, 400);
 
         var summary = SnapshotManager.summarize(diff);
         var content = new VBox(8);
@@ -842,14 +917,14 @@ public class BottomTabs {
             content.getChildren().add(new Label("No changes detected."));
         } else {
             if (summary.addedCount() > 0) content.getChildren().add(new Label(
-                    "Added: " + summary.addedCount() + " files (" + MainWindow.formatSize(summary.totalAdded()) + ")"));
+                    "Added: " + summary.addedCount() + " files (" + SizeFormat.format(summary.totalAdded()) + ")"));
             if (summary.removedCount() > 0) content.getChildren().add(new Label(
-                    "Removed: " + summary.removedCount() + " files (" + MainWindow.formatSize(summary.totalRemoved()) + ")"));
+                    "Removed: " + summary.removedCount() + " files (" + SizeFormat.format(summary.totalRemoved()) + ")"));
             if (summary.grownCount() > 0) content.getChildren().add(new Label(
-                    "Grown: " + summary.grownCount() + " files (+" + MainWindow.formatSize(summary.totalGrown()) + ")"));
+                    "Grown: " + summary.grownCount() + " files (+" + SizeFormat.format(summary.totalGrown()) + ")"));
             if (summary.shrunkCount() > 0) content.getChildren().add(new Label(
-                    "Shrunk: " + summary.shrunkCount() + " files (-" + MainWindow.formatSize(summary.totalShrunk()) + ")"));
-            content.getChildren().add(new Label("Net change: " + MainWindow.formatSize(summary.netChange())));
+                    "Shrunk: " + summary.shrunkCount() + " files (-" + SizeFormat.format(summary.totalShrunk()) + ")"));
+            content.getChildren().add(new Label("Net change: " + SizeFormat.format(summary.netChange())));
         }
 
         dialog.getDialogPane().setContent(content);
@@ -865,22 +940,29 @@ public class BottomTabs {
         return scroll;
     }
 
-    private void statusLabel(String text) {
-        var alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("Info");
-        alert.setHeaderText(null);
-        alert.setContentText(text);
-        alert.show();
+    // ── Shared helpers ───────────────────────────────────────────────────
+
+    private boolean confirmDelete(String header, String details) {
+        var alert = new Alert(Alert.AlertType.CONFIRMATION);
+        alert.setTitle("Confirm Deletion");
+        alert.setHeaderText(header);
+        if (details != null) alert.setContentText(details);
+        return alert.showAndWait().orElse(null) == ButtonType.OK;
     }
 
-    private static void deleteRecursive(Path path) throws IOException {
-        if (Files.isDirectory(path)) {
-            try (var stream = Files.walk(path)) {
-                stream.sorted(Comparator.reverseOrder())
-                        .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
-            }
-        } else {
-            Files.delete(path);
+    private void reportDeletionResult(DeletionService.DeletionResult result) {
+        if (result.allSucceeded()) {
+            reportStatus("Deleted " + result.deleted().size() + " item(s)"
+                    + (Settings.get().moveToTrash ? " (moved to trash)" : ""));
+            return;
         }
+        var alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle("Some items were not deleted");
+        alert.setHeaderText(result.deleted().size() + " deleted, " + result.failureCount() + " failed");
+        var details = result.errors().entrySet().stream()
+                .map(e -> e.getKey() + ": " + e.getValue())
+                .collect(Collectors.joining("\n"));
+        alert.setContentText(details);
+        alert.showAndWait();
     }
 }

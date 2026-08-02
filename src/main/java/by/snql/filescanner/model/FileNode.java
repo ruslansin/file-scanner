@@ -24,9 +24,24 @@ public class FileNode implements Comparable<FileNode> {
         this.children = new ArrayList<>();
     }
 
+    /**
+     * Adds a freshly-discovered child and accumulates its size into this node's size.
+     * Use this while building a tree bottom-up during a scan.
+     */
     public void addChild(FileNode child) {
         children.add(child);
         size += child.size;
+    }
+
+    /**
+     * Attaches a child whose size (and its subtree's contribution) is already
+     * reflected in this node's own {@link #size}. Does NOT accumulate size again.
+     * Use this when reconstructing a tree from a source (cache, snapshot, deep copy)
+     * that already stored the correct aggregate sizes — calling {@link #addChild}
+     * here would double- (or n-times-) count every node's size by its depth.
+     */
+    public void attachChild(FileNode child) {
+        children.add(child);
     }
 
     public Path getPath() { return path; }
@@ -59,5 +74,25 @@ public class FileNode implements Comparable<FileNode> {
     @Override
     public int compareTo(FileNode other) {
         return Long.compare(other.size, this.size);
+    }
+
+    /**
+     * Deep-copies a tree, preserving each node's already-computed size (via
+     * {@link #attachChild}, not {@link #addChild}). Safe to call on a tree that
+     * another thread may still be mutating concurrently: reads its own local
+     * variables of {@code node} only once per node before recursing, so at worst
+     * it may miss very recent children — it will never observe a torn/inconsistent
+     * children list from a concurrent structural modification exception.
+     */
+    public static FileNode copyOf(FileNode node) {
+        var copy = new FileNode(node.path, node.name, node.directory, node.size);
+        copy.buildArtifact = node.buildArtifact;
+        copy.symlink = node.symlink;
+        copy.hardlinkReference = node.hardlinkReference;
+        copy.lastModified = node.lastModified;
+        for (var child : List.copyOf(node.children)) {
+            copy.attachChild(copyOf(child));
+        }
+        return copy;
     }
 }

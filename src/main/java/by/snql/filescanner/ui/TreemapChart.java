@@ -15,13 +15,7 @@ public class TreemapChart extends StackPane {
     private FileNode root;
     private Consumer<FileNode> onNodeClicked;
     private TreemapLayout.Rect[] currentRects;
-
-    private static final Color[] PALETTE = {
-            Color.rgb(0x34, 0x98, 0xDB), Color.rgb(0x2E, 0xCC, 0x71),
-            Color.rgb(0xE7, 0x4C, 0x3C), Color.rgb(0x9B, 0x59, 0xB6),
-            Color.rgb(0xF3, 0x9C, 0x12), Color.rgb(0x1A, 0xBC, 0x9C),
-            Color.rgb(0xE6, 0x7E, 0x22), Color.rgb(0x34, 0x49, 0x5E)
-    };
+    private boolean redrawScheduled;
 
     public TreemapChart() {
         canvas = new Canvas();
@@ -34,8 +28,19 @@ public class TreemapChart extends StackPane {
         canvas.setOnMouseClicked(this::onMouseClicked);
         canvas.setOnMouseMoved(this::onMouseMoved);
 
-        widthProperty().addListener((obs, old, w) -> redraw());
-        heightProperty().addListener((obs, old, h) -> redraw());
+        // Width and height typically change together on a resize; coalesce the two
+        // notifications into a single layout+redraw pass instead of computing twice.
+        widthProperty().addListener((obs, old, w) -> scheduleRedraw());
+        heightProperty().addListener((obs, old, h) -> scheduleRedraw());
+    }
+
+    private void scheduleRedraw() {
+        if (redrawScheduled) return;
+        redrawScheduled = true;
+        javafx.application.Platform.runLater(() -> {
+            redrawScheduled = false;
+            redraw();
+        });
     }
 
     public void setRoot(FileNode node) {
@@ -84,7 +89,7 @@ public class TreemapChart extends StackPane {
         if (r.w() < 20 || r.h() < 14) return;
 
         String name = r.node().getName();
-        String size = MainWindow.formatSize(r.node().getSize());
+        String size = by.snql.filescanner.core.util.SizeFormat.format(r.node().getSize());
         String text = name + "  " + size;
 
         gc.setFill(Color.WHITE);
@@ -104,7 +109,7 @@ public class TreemapChart extends StackPane {
 
     private Color colorFor(FileNode node, int depth) {
         if (node.isLeaf() || !node.isDirectory()) {
-            return FileTypeCategory.forFile(node.getName()).color().deriveColor(1, 1, 0.7 + depth * 0.05, 1);
+            return FileTypeCategory.colorFor(node.getName()).deriveColor(1, 1, 0.7 + depth * 0.05, 1);
         }
         double b = 0.5 + depth * 0.08;
         return Color.rgb((int)(52 * b), (int)(73 * b), (int)(94 * b));

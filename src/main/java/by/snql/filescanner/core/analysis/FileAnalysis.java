@@ -1,24 +1,26 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.analysis;
 
+import by.snql.filescanner.config.Settings;
 import by.snql.filescanner.model.FileNode;
 
+import java.io.IOException;
 import java.nio.file.Files;
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Path;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
 
 public final class FileAnalysis {
 
-    private static final Set<String> EXCLUDE_PATTERNS = Set.of(
-            ".git/", "node_modules/", "target/", "__pycache__/", ".next/",
-            "build/", "dist/", "vendor/", ".venv/", "venv/", ".gradle/"
+    private static final Set<String> EXCLUDE_DIR_NAMES = Set.of(
+            ".git", "node_modules", "target", "__pycache__", ".next",
+            "build", "dist", "vendor", ".venv", "venv", ".gradle"
     );
 
     private static final long MIN_WASTE_THRESHOLD = 1024;
     private static final int MAX_GROUPS = 50;
-    private static final int MAX_FILES_PER_GROUP = 3;
 
     private FileAnalysis() {}
 
@@ -61,19 +63,20 @@ public final class FileAnalysis {
         var bySize = new HashMap<Long, List<FileNode>>();
         for (var file : flattenFiles(root)) {
             if (file.getSize() == 0) continue;
-            if (isExcluded(file.getPath().toString())) continue;
+            if (file.isSymlink() || file.isHardlinkReference()) continue;
+            if (isExcluded(file.getPath())) continue;
             bySize.computeIfAbsent(file.getSize(), k -> new ArrayList<>()).add(file);
         }
 
         var result = new ArrayList<DuplicateGroup>();
 
-        for (var entry : bySize.entrySet()) {
-            var group = entry.getValue();
+        for (var group : bySize.values()) {
             if (group.size() < 2) continue;
 
             var byHash = new HashMap<String, List<FileNode>>();
             for (var file : group) {
                 String hash = hashFile(file);
+                if (hash == null) continue;
                 byHash.computeIfAbsent(hash, k -> new ArrayList<>()).add(file);
             }
             for (var sub : byHash.values()) {
@@ -91,24 +94,28 @@ public final class FileAnalysis {
         return result;
     }
 
+    /** Longest common ancestor directory of a group of files. Cross-platform (uses Path, not string ops). */
     public static String commonPathPrefix(List<FileNode> files) {
         if (files.isEmpty()) return "";
-        var paths = files.stream().map(f -> f.getPath().toString()).toList();
-        String first = paths.get(0);
-        int len = first.length();
-        for (int i = 1; i < paths.size(); i++) {
-            String s = paths.get(i);
-            int j = 0;
-            while (j < len && j < s.length() && first.charAt(j) == s.charAt(j)) j++;
-            len = j;
+        Path common = files.get(0).getPath().getParent();
+        for (int i = 1; i < files.size() && common != null; i++) {
+            common = commonAncestor(common, files.get(i).getPath().getParent());
         }
-        int lastSlash = first.lastIndexOf('/', len);
-        return lastSlash > 0 ? first.substring(0, lastSlash + 1) : first.substring(0, len);
+        return common != null ? common.toString() : "";
     }
 
-    private static boolean isExcluded(String path) {
-        for (var pattern : EXCLUDE_PATTERNS) {
-            if (path.contains(pattern)) return true;
+    private static Path commonAncestor(Path a, Path b) {
+        if (a == null || b == null) return null;
+        Path candidate = a;
+        while (candidate != null && !b.startsWith(candidate)) {
+            candidate = candidate.getParent();
+        }
+        return candidate;
+    }
+
+    private static boolean isExcluded(Path path) {
+        for (var part : path) {
+            if (EXCLUDE_DIR_NAMES.contains(part.toString())) return true;
         }
         return false;
     }
@@ -116,8 +123,8 @@ public final class FileAnalysis {
     public static List<FileNode> oldFiles(FileNode root, long olderThanMillis) {
         long cutoff = System.currentTimeMillis() - olderThanMillis;
         return flattenFiles(root).stream()
-                .filter(f -> lastModified(f) > 0 && lastModified(f) < cutoff)
-                .sorted(Comparator.comparingLong(FileAnalysis::lastModified))
+                .filter(f -> f.getLastModified() > 0 && f.getLastModified() < cutoff)
+                .sorted(Comparator.comparingLong(FileNode::getLastModified))
                 .collect(Collectors.toList());
     }
 
@@ -137,12 +144,12 @@ public final class FileAnalysis {
     }
 
     public static long totalDuplicateWaste(List<DuplicateGroup> groups) {
-        return groups.stream().mapToLong(g -> g.wastedSize()).sum();
+        return groups.stream().mapToLong(DuplicateGroup::wastedSize).sum();
     }
 
-    private static String extension(String name) {
+    public static String extension(String name) {
         int dot = name.lastIndexOf('.');
-        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "(no extension)";
+        return dot > 0 ? name.substring(dot + 1).toLowerCase(Locale.ROOT) : "(no extension)";
     }
 
     private static String hashFile(FileNode file) {
@@ -150,26 +157,22 @@ public final class FileAnalysis {
             var digest = MessageDigest.getInstance("SHA-256");
             try (var in = new DigestInputStream(Files.newInputStream(file.getPath()), digest)) {
                 byte[] buf = new byte[8192];
-                while (in.read(buf) != -1) {}
+                while (in.read(buf) != -1) {
+                    // digest updates as a side effect of read()
+                }
             }
             return bytesToHex(digest.digest());
-        } catch (Exception e) {
-            return file.getPath().toString();
-        }
-    }
-
-    private static long lastModified(FileNode file) {
-        if (file.getLastModified() > 0) return file.getLastModified();
-        try {
-            return Files.readAttributes(file.getPath(), BasicFileAttributes.class).lastModifiedTime().toMillis();
-        } catch (Exception e) {
-            return 0;
+        } catch (IOException e) {
+            return null; // Unreadable file — exclude from duplicate matching rather than
+                         // treating its path string as a fake "hash" that never collides.
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
         }
     }
 
     private static String bytesToHex(byte[] bytes) {
-        var sb = new StringBuilder();
-        for (byte b : bytes) sb.append(String.format("%02x", b));
+        var sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format(Locale.ROOT, "%02x", b));
         return sb.toString();
     }
 

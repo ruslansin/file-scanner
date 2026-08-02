@@ -1,8 +1,6 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.analysis;
 
 import by.snql.filescanner.model.FileNode;
-
-import java.util.List;
 
 public final class CompressionEstimate {
 
@@ -27,7 +25,7 @@ public final class CompressionEstimate {
 
     public static long estimateCompressedSize(FileNode file) {
         if (file.getSize() == 0) return 0;
-        String ext = ext(file.getName());
+        String ext = FileCategory.extension(file.getName());
         double ratio = switch (ext) {
             case "jpg", "jpeg", "png", "gif", "bmp", "webp", "ico", "mp4", "mkv", "avi", "mov", "webm" -> 0.98;
             case "mp3", "wav", "flac", "aac", "ogg", "m4a" -> 0.95;
@@ -39,10 +37,5 @@ public final class CompressionEstimate {
             default -> 0.50;
         };
         return (long) (file.getSize() * ratio);
-    }
-
-    private static String ext(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "";
     }
 }

@@ -1,5 +1,9 @@
-package by.snql.filescanner.ui;
+package by.snql.filescanner.core.export;
 
+import by.snql.filescanner.config.Settings;
+import by.snql.filescanner.core.analysis.CompressionEstimate;
+import by.snql.filescanner.core.analysis.FileAnalysis;
+import by.snql.filescanner.core.util.SizeFormat;
 import by.snql.filescanner.model.FileNode;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -335,23 +339,8 @@ public class PdfReport {
     // ── Helpers ──
 
     private static String catName(String name) {
-        String ext = ext(name);
-        return switch (ext) {
-            case "jpg", "jpeg", "png", "gif", "bmp", "svg", "webp", "ico", "tiff", "psd", "raw" -> "Image";
-            case "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm" -> "Video";
-            case "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus" -> "Audio";
-            case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt" -> "Document";
-            case "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "jar", "war", "iso" -> "Archive";
-            case "java", "py", "js", "ts", "c", "cpp", "h", "hpp", "cs", "go", "rs", "rb", "php",
-                 "swift", "kt", "scala", "sh", "html", "css", "xml", "json" -> "Code";
-            case "exe", "dll", "so", "dylib", "bin" -> "Executable";
-            default -> "Other";
-        };
-    }
-
-    private static String ext(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot > 0 ? name.substring(dot + 1).toLowerCase() : "";
+        String cat = by.snql.filescanner.core.analysis.FileCategory.forFile(name).name();
+        return cat.charAt(0) + cat.substring(1).toLowerCase(java.util.Locale.ROOT);
     }
 
     private static long countDirs(FileNode node) {
@@ -398,14 +387,8 @@ public class PdfReport {
         return String.format("%,d", n);
     }
 
-    private static final String[] SIZE_UNITS = {"B", "KB", "MB", "GB", "TB"};
-
     private static String formatSize(long bytes) {
-        if (bytes <= 0) return "0 B";
-        int unit = (int) (Math.log10(bytes) / Math.log10(1024));
-        unit = Math.min(unit, SIZE_UNITS.length - 1);
-        double value = bytes / Math.pow(1024, unit);
-        return String.format("%.1f %s", value, SIZE_UNITS[unit]);
+        return SizeFormat.format(bytes);
     }
 
     private static String asciiSafe(String s) {

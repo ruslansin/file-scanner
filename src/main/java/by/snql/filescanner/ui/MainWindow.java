@@ -323,6 +323,29 @@ public class MainWindow {
         highlightInTree(node);
     }
 
+    private void onTreeItemClicked(FileNode clicked) {
+        var selected = treeView.getSelectionModel().getSelectedItems().stream()
+                .filter(item -> item.getValue() != null)
+                .map(TreeItem::getValue)
+                .toList();
+        if (selected.size() > 1 && selected.contains(clicked)) {
+            var synthetic = createGroupNode(selected);
+            pushView(synthetic);
+        } else {
+            resetView(clicked);
+        }
+    }
+
+    private static FileNode createGroupNode(List<FileNode> nodes) {
+        var label = nodes.stream().map(FileNode::getName)
+                .collect(Collectors.joining(", "));
+        if (label.length() > 60) label = label.substring(0, 57) + "...";
+        long totalSize = nodes.stream().mapToLong(FileNode::getSize).sum();
+        var group = new FileNode(Path.of(""), label, true, totalSize);
+        nodes.forEach(group::attachChild);
+        return group;
+    }
+
     private void onKeyPressed(KeyEvent e) {
         if (e.getCode() == KeyCode.DELETE) {
             var selected = treeView.getSelectionModel().getSelectedItems();
@@ -423,6 +446,7 @@ public class MainWindow {
         if (result.deleted().isEmpty() || currentRoot == null) return;
 
         var removedPaths = new HashSet<>(result.deleted());
+        var focusPath = result.deleted().get(0).getParent();
         removeDeletedPaths(currentRoot, removedPaths);
 
         applySort(currentRoot);
@@ -431,6 +455,10 @@ public class MainWindow {
         sizeLabel.setText(SizeFormat.format(currentRoot.getSize()));
         updateCounts(currentRoot);
         bottomTabs.setRoot(currentRoot);
+
+        if (focusPath != null) {
+            highlightInTree(focusPath);
+        }
         Thread.ofVirtual().start(() -> CacheManager.saveLastScan(currentRoot));
     }
 
@@ -616,7 +644,7 @@ public class MainWindow {
             };
             cell.setOnMouseClicked(e -> {
                 if (e.getClickCount() == 1 && !cell.isEmpty()) {
-                    resetView(cell.getItem());
+                    onTreeItemClicked(cell.getItem());
                 }
             });
             return cell;
@@ -820,6 +848,12 @@ public class MainWindow {
     private void highlightInTree(FileNode target) {
         if (treeView.getRoot() == null || target == null || target.getPath() == null) return;
         expandAndSelect(treeView.getRoot(), target.getPath());
+    }
+
+    private void highlightInTree(Path path) {
+        if (treeView.getRoot() == null || path == null) return;
+        treeView.getSelectionModel().clearSelection();
+        expandAndSelect(treeView.getRoot(), path);
     }
 
     private boolean expandAndSelect(TreeItem<FileNode> item, Path targetPath) {

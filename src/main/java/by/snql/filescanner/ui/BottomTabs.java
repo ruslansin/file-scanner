@@ -28,8 +28,11 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
@@ -61,6 +64,10 @@ public class BottomTabs {
     private long artifactsReclaimable = -1;
     private long dockerReclaimable = -1;
     private long cachesReclaimable = -1;
+
+    private List<SystemCleanup.BuildArtifact> currentArtifacts = List.of();
+    private Map<SystemCleanup.BuildArtifact, Long> currentArtifactSizes = Map.of();
+    private Map<SystemCleanup.Target, Long> currentCacheSizes = Map.of();
 
     private final VBox compressBox;
     private final ComboBox<String> groupMode;
@@ -520,6 +527,8 @@ public class BottomTabs {
 
         Platform.runLater(() -> {
             if (generation.get() != myGen) return;
+            currentArtifacts = artifacts;
+            currentArtifactSizes = sizes;
             artifactsReclaimable = finalTotal;
             updateTotalReclaimableHeader();
             renderBuildArtifacts(artifacts, sizes, finalTotal);
@@ -551,7 +560,16 @@ public class BottomTabs {
             var paths = artifacts.stream().map(SystemCleanup.BuildArtifact::path).toList();
             var result = DeletionService.delete(paths, Settings.get().moveToTrash);
             reportDeletionResult(result);
-            refreshDevCleanup();
+            if (!result.deleted().isEmpty()) {
+                var deletedSet = new HashSet<>(result.deleted());
+                currentArtifacts = currentArtifacts.stream()
+                        .filter(a -> !deletedSet.contains(a.path())).toList();
+                currentArtifactSizes.keySet().removeIf(a -> deletedSet.contains(a.path()));
+                long newTotal = currentArtifactSizes.values().stream().mapToLong(Long::longValue).sum();
+                artifactsReclaimable = newTotal;
+                updateTotalReclaimableHeader();
+                renderBuildArtifacts(currentArtifacts, currentArtifactSizes, newTotal);
+            }
         });
         artifactsSection.getChildren().add(new HBox(10, summary, deleteAllBtn));
 
@@ -599,7 +617,15 @@ public class BottomTabs {
                 if (!confirmDelete("Delete build artifact?", a.path() + "\nSize: " + SizeFormat.format(size))) return;
                 var result = DeletionService.delete(List.of(a.path()), Settings.get().moveToTrash);
                 reportDeletionResult(result);
-                refreshDevCleanup();
+                if (!result.deleted().isEmpty()) {
+                    currentArtifacts = currentArtifacts.stream()
+                            .filter(art -> !art.path().equals(a.path())).toList();
+                    currentArtifactSizes.remove(a);
+                    long newTotal = currentArtifactSizes.values().stream().mapToLong(Long::longValue).sum();
+                    artifactsReclaimable = newTotal;
+                    updateTotalReclaimableHeader();
+                    renderBuildArtifacts(currentArtifacts, currentArtifactSizes, newTotal);
+                }
             });
 
             actions.getChildren().addAll(openBtn, deleteBtn);
@@ -729,6 +755,7 @@ public class BottomTabs {
 
         Platform.runLater(() -> {
             if (generation.get() != myGen) return;
+            currentCacheSizes = Map.copyOf(sizes);
             cachesReclaimable = sizes.values().stream().mapToLong(Long::longValue).sum();
             updateTotalReclaimableHeader();
             renderCaches(sizes, needsElevationList);
@@ -745,6 +772,10 @@ public class BottomTabs {
         var grid = buildCleanupGrid(cleanupTargets, sizes, sectionHeader, needsElevationList);
         cachesSection.getChildren().add(grid);
         maybeShowElevateButton(needsElevationList, grid, sectionHeader);
+    }
+
+    private void renderCaches() {
+        renderCaches(new HashMap<>(currentCacheSizes), List.of());
     }
 
     private javafx.scene.layout.GridPane buildCleanupGrid(
@@ -840,7 +871,14 @@ public class BottomTabs {
         }
         var result = SystemCleanup.delete(target);
         reportDeletionResult(result);
-        refreshDevCleanup();
+        if (!result.deleted().isEmpty()) {
+            var mutable = new HashMap<>(currentCacheSizes);
+            mutable.put(target, 0L);
+            currentCacheSizes = Map.copyOf(mutable);
+            cachesReclaimable = currentCacheSizes.values().stream().mapToLong(Long::longValue).sum();
+            updateTotalReclaimableHeader();
+            renderCaches();
+        }
     }
 
     private void maybeShowElevateButton(List<Path> needsElevation,
